@@ -191,8 +191,8 @@ class IRNetDataset(Dataset):
         # Transform patch to tensor
         patch_tensor = self.transform(patch_rgb)
         
-        # Mine inter-pixel relations from CAM
-        relations = mine_relations(cam, fg_thresh=0.45, bg_thresh=0.35)
+        # Mine inter-pixel relations from CAM (HIGHER thresholds for thin cracks)
+        relations = mine_relations(cam, fg_thresh=0.6, bg_thresh=0.25)
         
         # Convert to tensors
         cam_tensor = torch.from_numpy(cam).float()

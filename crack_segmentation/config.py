@@ -93,6 +93,12 @@ DCRF_BI_W = 14                       # Light bilateral weight
 DCRF_BI_XY_STD = 25                 # Moderate bilateral spatial extent
 DCRF_BI_RGB_STD = 4                # Good color tolerance
 
+# Hybrid CAM + IRN parameters
+USE_BOUNDARY_REFINEMENT = True      # Use IRN boundary map to refine CAM
+BOUNDARY_SUPPRESSION_WEIGHT = 0.5   # How much to suppress CAM at boundaries (0-1)
+USE_DISPLACEMENT_CLUSTERING = False  # Use displacement field for instance separation
+DISPLACEMENT_CLUSTER_THRESHOLD = 5.0 # Distance threshold for clustering
+
 # ============================================================
 # DATA AUGMENTATION
 # ============================================================
