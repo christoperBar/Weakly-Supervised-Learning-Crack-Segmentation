@@ -37,6 +37,9 @@ logs/
 # Data files (usually too large for git)
 crack_segmentation/data/images/
 crack_segmentation/data/masks/
+crack_segmentation/data/BW/
+crack_segmentation/data/rgb/
+data/
 *.jpg
 *.jpeg
 *.png
