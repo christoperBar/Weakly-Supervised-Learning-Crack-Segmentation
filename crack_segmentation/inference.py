@@ -4,7 +4,7 @@ inference.py - Stage 4: Generate Pseudo Instance Segmentation Labels
 Menggunakan trained CAM + IRNet untuk:
 1. Extract CAM dari full image (patch-by-patch)
 2. Extract boundary map (B) dan displacement field (D) dari IRNet
-3. Synthesize pseudo instance labels menggunakan random walk (Sec 5)
+3. Synthesize pseudo instance labels 
 
 Input: Full crack images (4032x3024)
 Output: Pseudo segmentation masks
