@@ -4,7 +4,7 @@ inference.py - Stage 4: Generate Pseudo Instance Segmentation Labels
 Menggunakan trained CAM + IRNet untuk:
 1. Extract CAM dari full image (patch-by-patch)
 2. Extract boundary map (B) dan displacement field (D) dari IRNet
-3. Synthesize pseudo instance labels menggunakan random walk (Sec 5)
+3. Synthesize pseudo instance labels 
 
 Input: Full crack images (4032x3024)
 Output: Pseudo segmentation masks
@@ -263,13 +263,18 @@ def displacement_to_instance_map(D):
 def synthesize_pseudo_label(cam, D, B, img_rgb=None,
                            beta=8, t_walk=256, bg_quantile=0.25, b_penalty=0.7):
     """
-    Synthesize pseudo label via CAM-based approach with DenseCRF refinement.
-    Since IRNet outputs are unreliable, rely primarily on CAM quality.
+    Synthesize pseudo label via Hybrid CAM+IRN approach with DenseCRF refinement.
+    
+    Pipeline:
+    1. Boundary-aware CAM refinement: Use IRN boundary map to suppress CAM at edges
+    2. DenseCRF refinement: Edge-aware smoothing using original RGB image
+    3. Thresholding and morphological operations
+    4. Optional: Displacement-based instance clustering
     
     Args:
         cam: (H, W) CAM array (primary signal)
-        D: (h, w, 2) displacement field (ignored)
-        B: (h, w) boundary map (ignored)
+        D: (H, W, 2) displacement field for instance separation
+        B: (H, W) boundary map for edge refinement
         img_rgb: (H, W, 3) original RGB image for DenseCRF (optional)
     
     Returns:
@@ -287,7 +292,26 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
     print(f"   [DEBUG synthesize] cam_enhanced min/max: {cam_enhanced.min():.4f}/{cam_enhanced.max():.4f}")
     print(f"   [DEBUG synthesize] CAM >0.3 ratio: {(cam_enhanced > 0.3).sum() / cam_enhanced.size:.4f}")
     
-    # Apply DenseCRF refinement BEFORE binarization for better boundary alignment
+    # STAGE 1: Hybrid CAM + IRN Boundary Refinement
+    if config.USE_BOUNDARY_REFINEMENT and B is not None:
+        # Resize boundary map to match CAM resolution if needed
+        if B.shape != (H, W):
+            B_resized = cv2.resize(B, (W, H))
+        else:
+            B_resized = B
+        
+        # Suppress CAM activations at boundary locations
+        # High boundary probability → likely edge → suppress crack activation
+        boundary_mask = 1.0 - (B_resized * config.BOUNDARY_SUPPRESSION_WEIGHT)
+        cam_hybrid = cam_enhanced * boundary_mask
+        
+        print(f"   [DEBUG synthesize] Applied boundary refinement")
+        print(f"   [DEBUG synthesize] B min/max: {B_resized.min():.4f}/{B_resized.max():.4f}")
+        print(f"   [DEBUG synthesize] cam_hybrid min/max: {cam_hybrid.min():.4f}/{cam_hybrid.max():.4f}")
+        
+        cam_enhanced = cam_hybrid
+    
+    # STAGE 2: Apply DenseCRF refinement for edge-aware smoothing
     if img_rgb is not None and DENSECRF_AVAILABLE and config.USE_DENSECRF:
         print(f"   [DEBUG synthesize] Applying DenseCRF...")
         cam_enhanced = apply_densecrf(img_rgb, cam_enhanced)
@@ -308,11 +332,11 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
         _, binary = cv2.threshold(cam_uint8, thresh_val, 255, cv2.THRESH_BINARY)
         print(f"   [DEBUG synthesize] Adjusted threshold: {thresh_val}, pixels above: {(binary > 0).sum()}")
     
-    # Aggressive morphological closing to connect crack segments
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    # Gentle morphological operations to preserve thin crack structure
+    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # REDUCED from (9,9)
+    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))   # REDUCED from (3,3)
     
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=3)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=1)  # REDUCED from 3
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open, iterations=1)
     
     print(f"   [DEBUG synthesize] After morphology pixels: {(binary > 0).sum()}")
@@ -330,7 +354,92 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
     final_pixels = (binary > 0).sum()
     print(f"   [DEBUG synthesize] Final pixels after filtering: {final_pixels}")
     
+    # STAGE 3 (Optional): Displacement-based instance clustering
+    if config.USE_DISPLACEMENT_CLUSTERING and D is not None:
+        print(f"   [DEBUG synthesize] Applying displacement-based clustering...")
+        
+        # Resize displacement field to match binary mask resolution if needed
+        if D.shape[:2] != (H, W):
+            D_resized = np.zeros((H, W, 2), dtype=np.float32)
+            D_resized[:, :, 0] = cv2.resize(D[:, :, 0], (W, H))
+            D_resized[:, :, 1] = cv2.resize(D[:, :, 1], (W, H))
+        else:
+            D_resized = D
+        
+        # Apply displacement field only to crack regions
+        binary_clustered = apply_displacement_clustering(binary, D_resized)
+        binary = binary_clustered
+        
+        print(f"   [DEBUG synthesize] After displacement clustering: {(binary > 0).sum()} pixels")
+    
     return binary
+
+
+def apply_displacement_clustering(binary_mask, displacement_field):
+    """
+    Apply displacement-based instance clustering to separate crack instances.
+    
+    Args:
+        binary_mask: (H, W) binary mask of crack regions
+        displacement_field: (H, W, 2) displacement vectors
+    
+    Returns:
+        clustered_mask: (H, W) binary mask with refined instance boundaries
+    """
+    H, W = binary_mask.shape
+    
+    # Only process crack pixels
+    crack_coords = np.column_stack(np.where(binary_mask > 0))
+    
+    if len(crack_coords) == 0:
+        return binary_mask
+    
+    # Get displacement vectors for crack pixels
+    displacements = displacement_field[crack_coords[:, 0], crack_coords[:, 1]]
+    
+    # Target positions = current positions + displacements
+    target_positions = crack_coords + displacements
+    
+    # Cluster pixels by their target positions using connected components
+    # Create a temporary target map
+    target_map = np.zeros((H, W), dtype=np.int32)
+    
+    for i, (y, x) in enumerate(crack_coords):
+        ty, tx = target_positions[i]
+        ty = int(np.clip(ty, 0, H-1))
+        tx = int(np.clip(tx, 0, W-1))
+        target_map[y, x] = ty * W + tx
+    
+    # Group pixels pointing to similar targets
+    # Use connected components on the crack mask, then filter by displacement coherence
+    num_labels, labels = cv2.connectedComponents(binary_mask, connectivity=8)
+    
+    refined_mask = binary_mask.copy()
+    
+    for label_id in range(1, num_labels):
+        component_mask = (labels == label_id)
+        component_coords = np.column_stack(np.where(component_mask))
+        
+        if len(component_coords) < 10:
+            continue
+        
+        # Check displacement coherence within this component
+        component_targets = target_map[component_coords[:, 0], component_coords[:, 1]]
+        
+        # If targets are too scattered, this might be multiple instances
+        unique_targets, counts = np.unique(component_targets, return_counts=True)
+        
+        # If displacement vectors are incoherent (pointing to many different places),
+        # this could indicate boundary regions to remove
+        coherence = counts.max() / len(component_coords)
+        
+        if coherence < 0.3:  # Low coherence → likely boundary/noise
+            # Erode this component slightly
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            eroded = cv2.erode(component_mask.astype(np.uint8), kernel, iterations=1)
+            refined_mask[component_mask & (eroded == 0)] = 0
+    
+    return refined_mask
 
 
 def process_full_image(img_rgb, cam_net, irnet, transform, device,
@@ -423,7 +532,12 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
     
     cam_ds = cv2.resize(cam_full, (w_ds, h_ds))
     B_ds = cv2.resize(B_full, (w_ds, h_ds))
-    D_ds = cv2.resize(D_full, (w_ds, h_ds))
+    
+    # Properly resize displacement field (each channel separately)
+    D_ds = np.zeros((h_ds, w_ds, 2), dtype=np.float32)
+    D_ds[:, :, 0] = cv2.resize(D_full[:, :, 0], (w_ds, h_ds))
+    D_ds[:, :, 1] = cv2.resize(D_full[:, :, 1], (w_ds, h_ds))
+    
     img_rgb_ds = cv2.resize(img_rgb, (w_ds, h_ds))  # Downsample RGB for DenseCRF
     
     # Synthesize pseudo label with DenseCRF refinement

@@ -87,11 +87,17 @@ REFINE_RADIUS = 1.0                 # Radius untuk neighbor averaging
 # DenseCRF post-processing
 USE_DENSECRF = True                 # Enable DenseCRF refinement
 DCRF_ITER = 6                      # Gentle refinement
-DCRF_POS_W = 3                     # Light spatial smoothing
-DCRF_POS_XY_STD = 12                # Small spatial kernel
-DCRF_BI_W = 14                       # Light bilateral weight
-DCRF_BI_XY_STD = 25                 # Moderate bilateral spatial extent
-DCRF_BI_RGB_STD = 4                # Good color tolerance
+DCRF_POS_W = 10                     # Light spatial smoothing
+DCRF_POS_XY_STD = 3                # Small spatial kernel
+DCRF_BI_W = 100                      # Light bilateral weight
+DCRF_BI_XY_STD = 10                 # Moderate bilateral spatial extent
+DCRF_BI_RGB_STD = 3                # Good color tolerance
+
+# Hybrid CAM + IRN parameters
+USE_BOUNDARY_REFINEMENT = True      # Use IRN boundary map to refine CAM
+BOUNDARY_SUPPRESSION_WEIGHT = 0.5   # How much to suppress CAM at boundaries (0-1)
+USE_DISPLACEMENT_CLUSTERING = False  # Use displacement field for instance separation
+DISPLACEMENT_CLUSTER_THRESHOLD = 5.0 # Distance threshold for clustering
 
 # ============================================================
 # DATA AUGMENTATION
