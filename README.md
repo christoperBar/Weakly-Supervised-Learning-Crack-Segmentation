@@ -56,6 +56,18 @@ Stage 4: Pseudo Label Synthesis
 ├── .gitignore
 ```
 
+## 🧪 Test Run
+
+### Quick Test
+
+```bash
+# Test semua components
+python quick_test.py
+
+# Run example usage
+python example_usage.py
+```
+
 ## 🚀 Quick Start
 
 ### 1. Run Docker
