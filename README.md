@@ -27,16 +27,6 @@ Stage 4: Pseudo Label Synthesis
     └─ Generate pseudo instance masks
 ```
 
-## 🎯 Features
-
-- ✅ Support untuk gambar resolusi tinggi (4032x3024)
-- ✅ Patch-based training dengan sliding window
-- ✅ Automatic mixed precision (AMP) untuk memory efficiency
-- ✅ Test-time augmentation (TTA) untuk robust predictions
-- ✅ Visualization tools untuk setiap stage
-- ✅ Evaluation metrics (IoU, Precision, Recall, F1)
-- ✅ Modular code structure untuk easy customization
-
 ## 📁 Project Structure
 
 ```
