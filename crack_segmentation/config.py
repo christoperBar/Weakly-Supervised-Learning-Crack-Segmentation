@@ -25,7 +25,13 @@ IMG_WIDTH = 3024
 PATCH_SIZE = 512                     # Ukuran patch untuk training
 PATCH_STRIDE = 256                   # Stride untuk sliding window
 MIN_CRACK_RATIO = 0.03              # Minimum ratio crack pixels untuk patch positif
-MAX_NEG_RATIO = 2.0                 # Ratio negative:positive patches
+MAX_NEG_RATIO = 1.0                 # Ratio negative:positive patches (1:1)
+
+# Train/validation/test split (berbasis citra, bukan patch)
+N_TRAIN_IMAGES = 150                # Jumlah citra untuk train
+N_VAL_IMAGES = 59                   # Jumlah citra untuk validation
+N_TEST_IMAGES = 50                  # Jumlah citra untuk test
+RANDOM_SEED = 42                    # Seed untuk reproducible split
 
 # Untuk inference pada full image
 INFERENCE_PATCH_SIZE = 512
@@ -47,7 +53,7 @@ RADIUS = 5                          # Search radius untuk neighbor pairs
 # TRAINING CONFIGURATION
 # ============================================================
 # Stage 1: Classification Network (CAM)
-CAM_EPOCHS = 10                      # Increased from 2 to 30 for better CAM learning
+CAM_EPOCHS = 50                      # Increased from 2 to 30 for better CAM learning
 CAM_BATCH_SIZE = 8
 CAM_LR = 1e-4                        # Reverted to original - 5e-4 was too high
 CAM_WEIGHT_DECAY = 1e-5
@@ -57,10 +63,17 @@ FOCAL_ALPHA = 0.25
 FOCAL_GAMMA = 2.0
 
 # Stage 2+3: IRNet Training
-IRN_EPOCHS = 5                      # Increased from 20
+IRN_EPOCHS = 50                      # Increased from 20
 IRN_BATCH_SIZE = 4                  # Lebih kecil karena lebih memory-intensive
-IRN_LR = 1e-3                        # Keep at 1e-3 for fast learning
-IRN_WEIGHT_DECAY = 1e-5
+IRN_LR = 6e-5 #1e-3                        # Keep at 1e-3 for fast learning
+IRN_WEIGHT_DECAY = 6e-6 #1e-5
+
+# Early stopping
+EARLY_STOPPING_ENABLED = True
+CAM_EARLY_STOP_PATIENCE = 8          # Stop jika metric CAM tidak membaik selama N epoch
+CAM_EARLY_STOP_MIN_DELTA = 1e-4      # Minimal kenaikan metric agar dianggap membaik
+IRN_EARLY_STOP_PATIENCE = 10         # Stop jika loss IRNet tidak membaik selama N epoch
+IRN_EARLY_STOP_MIN_DELTA = 1e-4      # Minimal penurunan loss agar dianggap membaik
 
 # Loss weights (from IRNet paper)
 GAMMA = 2.0                          # Increased from 0.5 - displacement needs more weight
@@ -86,18 +99,26 @@ REFINE_RADIUS = 1.0                 # Radius untuk neighbor averaging
 
 # DenseCRF post-processing
 USE_DENSECRF = True                 # Enable DenseCRF refinement
-DCRF_ITER = 6                      # Gentle refinement
+DCRF_ITER = 20                      # Gentle refinement
 DCRF_POS_W = 10                     # Light spatial smoothing
 DCRF_POS_XY_STD = 3                # Small spatial kernel
-DCRF_BI_W = 100                      # Light bilateral weight
+DCRF_BI_W = 150                      # Light bilateral weight
 DCRF_BI_XY_STD = 10                 # Moderate bilateral spatial extent
 DCRF_BI_RGB_STD = 3                # Good color tolerance
 
 # Hybrid CAM + IRN parameters
 USE_BOUNDARY_REFINEMENT = True      # Use IRN boundary map to refine CAM
-BOUNDARY_SUPPRESSION_WEIGHT = 0.5   # How much to suppress CAM at boundaries (0-1)
+BOUNDARY_SUPPRESSION_WEIGHT = 0.15  # How much to suppress CAM at boundaries (0-1)
 USE_DISPLACEMENT_CLUSTERING = False  # Use displacement field for instance separation
 DISPLACEMENT_CLUSTER_THRESHOLD = 5.0 # Distance threshold for clustering
+
+# Restorative fusion: IRN should help recover thin/disconnected crack regions
+IRN_RESTORE_GAIN = 0.75             # Strength of IRN support injection into CAM
+IRN_RESTORE_SEED_THRESH = 0.38      # High-confidence CAM seed threshold
+IRN_RESTORE_DILATION = 6            # Neighborhood around seeds for safe IRN support
+IRN_RESTORE_SUPPORT_THRESH = 0.20   # Minimum IRN support to be considered recoverable
+IRN_RESTORE_LOW_CONF_THRESH = 0.55  # Restore mainly where CAM confidence is still low
+IRN_RESTORE_CONNECT_DILATION = 6    # Connectivity anchor dilation around CAM seeds
 
 # ============================================================
 # DATA AUGMENTATION
@@ -106,8 +127,8 @@ DISPLACEMENT_CLUSTER_THRESHOLD = 5.0 # Distance threshold for clustering
 AUG_H_FLIP_PROB = 0.5
 AUG_V_FLIP_PROB = 0.5
 AUG_ROTATION_DEGREES = 15
-AUG_BRIGHTNESS = 0.2
-AUG_CONTRAST = 0.2
+AUG_BRIGHTNESS = 0.0
+AUG_CONTRAST = 0.0
 
 # ImageNet normalization (standard untuk ResNet)
 IMG_MEAN = [0.485, 0.456, 0.406]

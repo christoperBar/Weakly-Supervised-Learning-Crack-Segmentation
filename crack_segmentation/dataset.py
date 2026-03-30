@@ -26,7 +26,8 @@ class CrackPatchDataset(Dataset):
     """
     
     def __init__(self, img_dir, mask_dir, patch_size=512, stride=256, 
-                 transform=None, max_neg_ratio=2.0, min_crack_ratio=0.03):
+                 transform=None, max_neg_ratio=2.0, min_crack_ratio=0.03,
+                 img_files=None):
         """
         Args:
             img_dir: Directory berisi crack images
@@ -51,9 +52,12 @@ class CrackPatchDataset(Dataset):
         pos_patches = []
         neg_patches = []
         
-        # Scan semua gambar
-        img_files = sorted([f for f in os.listdir(img_dir) 
-                           if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        # Scan daftar gambar (bisa seluruh folder atau subset)
+        if img_files is None:
+            img_files = sorted([f for f in os.listdir(img_dir) 
+                               if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        else:
+            img_files = sorted(img_files)
         
         for fname in img_files:
             img_path = os.path.join(img_dir, fname)
@@ -191,10 +195,6 @@ def get_train_transform():
         transforms.RandomHorizontalFlip(p=config.AUG_H_FLIP_PROB),
         transforms.RandomVerticalFlip(p=config.AUG_V_FLIP_PROB),
         transforms.RandomRotation(config.AUG_ROTATION_DEGREES),
-        transforms.ColorJitter(
-            brightness=config.AUG_BRIGHTNESS,
-            contrast=config.AUG_CONTRAST
-        ),
         transforms.ToTensor(),
         transforms.Normalize(mean=config.IMG_MEAN, std=config.IMG_STD)
     ])
@@ -218,6 +218,48 @@ def denormalize_tensor(tensor):
     mean = torch.tensor(config.IMG_MEAN).view(3, 1, 1)
     std = torch.tensor(config.IMG_STD).view(3, 1, 1)
     return tensor * std + mean
+
+
+def get_image_splits(img_dir, n_train, n_val, n_test, seed=42):
+    """Bagi dataset citra menjadi train/val/test berdasarkan jumlah citra.
+
+    Split dilakukan di level gambar, sehingga semua patch yang berasal dari
+    satu gambar hanya akan berada di satu subset (train/val/test).
+    """
+
+    img_files = sorted([
+        f for f in os.listdir(img_dir)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    ])
+
+    total = len(img_files)
+    target_total = n_train + n_val + n_test
+
+    if total < target_total:
+        raise ValueError(
+            f"Not enough images in {img_dir}: found {total}, "
+            f"but n_train+n_val+n_test={target_total}."
+        )
+
+    rng = np.random.RandomState(seed)
+    indices = rng.permutation(total)
+
+    train_idx = indices[:n_train]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:n_train + n_val + n_test]
+
+    img_files = np.array(img_files)
+    train_files = img_files[train_idx].tolist()
+    val_files = img_files[val_idx].tolist()
+    test_files = img_files[test_idx].tolist()
+
+    print("\n🔀 Image-level split:")
+    print(f"   Total images: {total}")
+    print(f"   Train: {len(train_files)}")
+    print(f"   Val:   {len(val_files)}")
+    print(f"   Test:  {len(test_files)}")
+
+    return train_files, val_files, test_files
 
 
 def verify_dataset(img_dir, mask_dir):

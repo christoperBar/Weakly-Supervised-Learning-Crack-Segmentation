@@ -20,7 +20,7 @@ import config
 from resnet50_cam import CAM as CamExtractor
 from resnet50_irn import AffinityDisplacementLoss
 from path_index import PathIndex
-from dataset import get_inference_transform
+from dataset import get_inference_transform, get_image_splits
 
 
 def spatial_mask_to_pairs(mask, path_index, debug=False):
@@ -86,6 +86,72 @@ def spatial_mask_to_pairs(mask, path_index, debug=False):
     return pair_mask
 
 
+def spatial_masks_to_cross_pairs(src_mask, dst_mask, path_index):
+    """
+    Build cross-class pair mask for affinity loss.
+
+    A pair is valid if source pixel is in src_mask AND destination pixel is in dst_mask.
+    This is used for negative affinity supervision (fg <-> bg pairs).
+    """
+    B, H, W = src_mask.shape
+    device = src_mask.device
+
+    src_flat = src_mask.view(B, -1)
+    dst_flat = dst_mask.view(B, -1)
+
+    pair_masks_list = []
+
+    for dy, dx in path_index.search_dst:
+        y_start = max(0, -dy)
+        y_end = min(H, H - dy)
+        x_start = max(0, -dx)
+        x_end = min(W, W - dx)
+
+        src_indices = []
+        dst_indices = []
+
+        for sy in range(y_start, y_end):
+            for sx in range(x_start, x_end):
+                src_idx = sy * W + sx
+                dst_idx = (sy + dy) * W + (sx + dx)
+                src_indices.append(src_idx)
+                dst_indices.append(dst_idx)
+
+        src_indices_t = torch.tensor(src_indices, device=device, dtype=torch.long)
+        dst_indices_t = torch.tensor(dst_indices, device=device, dtype=torch.long)
+
+        src_vals = torch.gather(src_flat, 1, src_indices_t.unsqueeze(0).expand(B, -1))
+        dst_vals = torch.gather(dst_flat, 1, dst_indices_t.unsqueeze(0).expand(B, -1))
+
+        pair_vals = src_vals * dst_vals
+        pair_masks_list.append(pair_vals)
+
+    return torch.cat(pair_masks_list, dim=1)
+
+
+def spatial_masks_to_directional_pairs(src_mask, dst_mask, path_index):
+    """
+    Build directional pair masks aligned with displacement tensor layout.
+
+    Returns:
+        pair_mask: (B, D, N) where D=len(search_dst), N=cropped_H*cropped_W
+    """
+    B, H, W = src_mask.shape
+    radius_floor = path_index.radius_floor
+    cropped_h = H - radius_floor
+    cropped_w = W - 2 * radius_floor
+
+    src_crop = src_mask[:, :cropped_h, radius_floor:radius_floor + cropped_w]
+
+    directional_pairs = []
+    for dy, dx in path_index.search_dst:
+        dst_crop = dst_mask[:, dy:dy + cropped_h, radius_floor + dx:radius_floor + dx + cropped_w]
+        directional_pairs.append(src_crop * dst_crop)
+
+    pair_mask = torch.stack(directional_pairs, dim=1).reshape(B, len(path_index.search_dst), -1)
+    return pair_mask
+
+
 class IRNetDataset(Dataset):
     """
     Dataset untuk IRNet training.
@@ -96,16 +162,19 @@ class IRNetDataset(Dataset):
     3. Inter-pixel relations (P+_fg, P+_bg, P-) dari CAM
     """
     
-    def __init__(self, img_dir, cam_net, device, patch_size=256):
+    def __init__(self, img_dir, cam_net, device, patch_size=256, img_files=None):
         self.img_dir = img_dir
         self.cam_net = cam_net
         self.device = device
         self.patch_size = patch_size
         self.transform = get_inference_transform()
         
-        # Collect all image files
-        self.img_files = sorted([f for f in os.listdir(img_dir)
-                                if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        # Collect image files (bisa seluruh folder atau subset train)
+        if img_files is None:
+            self.img_files = sorted([f for f in os.listdir(img_dir)
+                                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        else:
+            self.img_files = sorted(img_files)
         
         # Pre-extract patches with their CAMs
         self.samples = []
@@ -268,7 +337,17 @@ def mine_relations(cam, fg_thresh=0.6, bg_thresh=0.2):
     }
 
 
-def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
+def _grad_group_l2_norm(params):
+    """Compute L2 norm of gradients for a parameter group."""
+    total = 0.0
+    for p in params:
+        if p.grad is not None:
+            g = p.grad.detach()
+            total += g.pow(2).sum().item()
+    return float(total ** 0.5)
+
+
+def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0, edge_params=None, dp_params=None):
     """Train IRNet satu epoch dengan proper pair-wise masking"""
     model.train()
     
@@ -277,6 +356,12 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
     total_neg_aff = 0
     total_dp_fg = 0
     total_dp_bg = 0
+    total_pos_fg_density = 0
+    total_pos_bg_density = 0
+    total_neg_density = 0
+    total_edge_grad_norm = 0
+    total_dp_grad_norm = 0
+    valid_batches = 0
     
     # Get path_index from model for mask conversion
     path_index = model.path_index
@@ -332,7 +417,11 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
         # Convert to pair-wise masks matching PathIndex structure
         pos_fg_pair = spatial_mask_to_pairs(pos_fg_masks_resized, path_index, debug=(batch_idx==0))
         pos_bg_pair = spatial_mask_to_pairs(pos_bg_masks_resized, path_index)
-        neg_pair = spatial_mask_to_pairs(neg_masks_resized, path_index)
+
+        # Negative affinity should come from cross-class pairs (fg<->bg).
+        neg_pair_fg_bg = spatial_masks_to_cross_pairs(pos_fg_masks_resized, pos_bg_masks_resized, path_index)
+        neg_pair_bg_fg = spatial_masks_to_cross_pairs(pos_bg_masks_resized, pos_fg_masks_resized, path_index)
+        neg_pair = torch.clamp(neg_pair_fg_bg + neg_pair_bg_fg, max=1.0)
         
         # Debug info  
         if batch_idx == 0:
@@ -348,27 +437,38 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
         if neg_aff_loss_raw.dim() == 3:
             neg_aff_loss_raw = neg_aff_loss_raw.squeeze(-1)  # (B, num_pairs)
         
-        # Only compute loss on valid pairs (where mask = 1)
-        pos_aff_loss_masked = pos_aff_loss_raw * pos_fg_pair  # (B, num_pairs)
+        # Positive affinity uses both confident foreground and confident background pairs.
+        pos_aff_loss_masked_fg = pos_aff_loss_raw * pos_fg_pair
+        pos_aff_loss_masked_bg = pos_aff_loss_raw * pos_bg_pair
         neg_aff_loss_masked = neg_aff_loss_raw * neg_pair     # (B, num_pairs)
         
         # Average only over valid (non-zero) pairs
         pos_fg_count = pos_fg_pair.sum() + 1e-5
+        pos_bg_count = pos_bg_pair.sum() + 1e-5
+        pos_count = pos_fg_count + pos_bg_count
         neg_count = neg_pair.sum() + 1e-5
         
-        pos_aff_loss = pos_aff_loss_masked.sum() / pos_fg_count
+        pos_aff_loss = (pos_aff_loss_masked_fg.sum() + pos_aff_loss_masked_bg.sum()) / pos_count
         neg_aff_loss = neg_aff_loss_masked.sum() / neg_count
         
-        # For displacement losses, we need different handling
-        # dp_fg_loss_raw and dp_bg_loss_raw have shape (B, 2, D, N)
-        # We need to mask based on the source pixel's relation mask
-        # Simplified: use mean over spatial dimension with relation density weighting
+        # For displacement losses, mask directly at directional pair level.
+        # dp_*_loss_raw shape: (B, 2, D, N)
+        dp_fg_pair_mask = spatial_masks_to_directional_pairs(pos_fg_masks_resized, pos_fg_masks_resized, path_index)
+        dp_bg_pair_mask = spatial_masks_to_directional_pairs(pos_bg_masks_resized, pos_bg_masks_resized, path_index)
+
+        dp_fg_mask_exp = dp_fg_pair_mask.unsqueeze(1)  # (B, 1, D, N)
+        dp_bg_mask_exp = dp_bg_pair_mask.unsqueeze(1)  # (B, 1, D, N)
+
+        dp_fg_count = dp_fg_mask_exp.sum() * dp_fg_loss_raw.size(1) + 1e-5
+        dp_bg_count = dp_bg_mask_exp.sum() * dp_bg_loss_raw.size(1) + 1e-5
+
+        dp_fg_loss = (dp_fg_loss_raw * dp_fg_mask_exp).sum() / dp_fg_count
+        dp_bg_loss = (dp_bg_loss_raw * dp_bg_mask_exp).sum() / dp_bg_count
+
+        # Keep density logging for visibility
         pos_fg_density = pos_fg_pair.float().mean(dim=1, keepdim=True)  # (B, 1)
         pos_bg_density = pos_bg_pair.float().mean(dim=1, keepdim=True)  # (B, 1)
-        
-        # Mean displacement loss, weighted by relation density
-        dp_fg_loss = (dp_fg_loss_raw.mean(dim=(1, 2, 3)) * pos_fg_density.squeeze()).mean()
-        dp_bg_loss = (dp_bg_loss_raw.mean(dim=(1, 2, 3)) * pos_bg_density.squeeze()).mean()
+        neg_density = neg_pair.float().mean(dim=1, keepdim=True)        # (B, 1)
         
         # Small regularization on displacement magnitude
         dp_reg = 0.001 * (dp_fg_loss_raw.pow(2).mean() + dp_bg_loss_raw.pow(2).mean())
@@ -387,6 +487,8 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
         
         # Backward with gradient clipping
         loss.backward()
+        edge_grad_norm = _grad_group_l2_norm(edge_params) if edge_params is not None else 0.0
+        dp_grad_norm = _grad_group_l2_norm(dp_params) if dp_params is not None else 0.0
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
@@ -396,6 +498,12 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
         total_neg_aff += neg_aff_loss.item()
         total_dp_fg += dp_fg_loss.item()
         total_dp_bg += dp_bg_loss.item()
+        total_pos_fg_density += pos_fg_density.mean().item()
+        total_pos_bg_density += pos_bg_density.mean().item()
+        total_neg_density += neg_density.mean().item()
+        total_edge_grad_norm += edge_grad_norm
+        total_dp_grad_norm += dp_grad_norm
+        valid_batches += 1
         
         # Update progress
         pbar.set_postfix({
@@ -403,17 +511,25 @@ def train_irnet_epoch(model, loader, optimizer, device, epoch, gamma=5.0):
             'pos': f'{pos_aff_loss.item():.4f}',
             'neg': f'{neg_aff_loss.item():.4f}',
             'dp_fg': f'{dp_fg_loss.item():.3f}',
-            'dp_bg': f'{dp_bg_loss.item():.3f}'
+            'dp_bg': f'{dp_bg_loss.item():.3f}',
+            'g_e': f'{edge_grad_norm:.3f}',
+            'g_d': f'{dp_grad_norm:.3f}'
         })
     
-    n = len(loader)
+    n = max(valid_batches, 1)
     
     return {
         'total_loss': total_loss / n,
         'pos_aff': total_pos_aff / n,
         'neg_aff': total_neg_aff / n,
         'dp_fg': total_dp_fg / n,
-        'dp_bg': total_dp_bg / n
+        'dp_bg': total_dp_bg / n,
+        'pos_fg_density': total_pos_fg_density / n,
+        'pos_bg_density': total_pos_bg_density / n,
+        'neg_density': total_neg_density / n,
+        'edge_grad_norm': total_edge_grad_norm / n,
+        'dp_grad_norm': total_dp_grad_norm / n,
+        'valid_batches': valid_batches
     }
 
 
@@ -485,11 +601,22 @@ def main():
     # Create IRNet dataset
     print(f"\n📦 Creating IRNet dataset...")
     irn_patch_size = 256  # IRNet uses smaller patches than CAM stage
+
+    # Gunakan subset citra train untuk IRNet (jaga val/test tetap terpisah)
+    train_imgs, val_imgs, test_imgs = get_image_splits(
+        config.IMG_DIR,
+        n_train=config.N_TRAIN_IMAGES,
+        n_val=config.N_VAL_IMAGES,
+        n_test=config.N_TEST_IMAGES,
+        seed=config.RANDOM_SEED
+    )
+
     dataset = IRNetDataset(
         img_dir=config.IMG_DIR,
         cam_net=cam_net,
         device=device,
-        patch_size=irn_patch_size
+        patch_size=irn_patch_size,
+        img_files=train_imgs
     )
     
     loader = DataLoader(
@@ -519,6 +646,8 @@ def main():
     
     # Optimizer (only for branch parameters, backbone frozen)
     edge_params, dp_params = model.trainable_parameters()
+    edge_params = list(edge_params)
+    dp_params = list(dp_params)
     
     # Separate learning rates for edge and displacement branches
     param_groups = [
@@ -548,6 +677,9 @@ def main():
     print(f"\n🚀 Starting IRNet training...")
     print(f"   Epochs: {config.IRN_EPOCHS}")
     print(f"   Gamma (displacement weight): {config.GAMMA}")
+    print(f"   Early stopping: {config.EARLY_STOPPING_ENABLED}")
+    if config.EARLY_STOPPING_ENABLED:
+        print(f"   Patience: {config.IRN_EARLY_STOP_PATIENCE}, Min delta: {config.IRN_EARLY_STOP_MIN_DELTA}")
     
     history = {
         'total_loss': [],
@@ -558,6 +690,7 @@ def main():
     }
     
     best_loss = float('inf')
+    no_improve_epochs = 0
     
     for epoch in range(config.IRN_EPOCHS):
         print(f"\n{'='*60}")
@@ -566,7 +699,8 @@ def main():
         
         # Train
         metrics = train_irnet_epoch(
-            model, loader, optimizer, device, epoch, gamma=config.GAMMA
+            model, loader, optimizer, device, epoch, gamma=config.GAMMA,
+            edge_params=edge_params, dp_params=dp_params
         )
         
         # Update history
@@ -584,11 +718,15 @@ def main():
         print(f"   Neg Aff Loss: {metrics['neg_aff']:.4f}")
         print(f"   DP FG Loss: {metrics['dp_fg']:.4f}")
         print(f"   DP BG Loss: {metrics['dp_bg']:.4f}")
+        print(f"   Mask density (FG/BG/NEG): {metrics['pos_fg_density']:.4f} / {metrics['pos_bg_density']:.4f} / {metrics['neg_density']:.4f}")
+        print(f"   Grad norm (edge/dp): {metrics['edge_grad_norm']:.4f} / {metrics['dp_grad_norm']:.4f}")
+        print(f"   Valid batches: {metrics['valid_batches']}/{len(loader)}")
         print(f"   Learning Rate: {current_lr:.2e}")
         
         # Save best model
-        if metrics['total_loss'] < best_loss:
+        if metrics['total_loss'] < (best_loss - config.IRN_EARLY_STOP_MIN_DELTA):
             best_loss = metrics['total_loss']
+            no_improve_epochs = 0
             save_path = os.path.join(config.OUTPUT_DIR, 'irnet_best.pth')
             torch.save({
                 'epoch': epoch,
@@ -597,6 +735,15 @@ def main():
                 'loss': metrics['total_loss'],
             }, save_path)
             print(f"   💾 Best model saved! (Loss: {best_loss:.4f})")
+        else:
+            no_improve_epochs += 1
+            if config.EARLY_STOPPING_ENABLED:
+                print(
+                    f"   ⏳ No improvement for {no_improve_epochs}/{config.IRN_EARLY_STOP_PATIENCE} epochs"
+                )
+                if no_improve_epochs >= config.IRN_EARLY_STOP_PATIENCE:
+                    print("\n🛑 Early stopping triggered on Stage 2+3 training")
+                    break
     
     # Save final model
     final_path = os.path.join(config.OUTPUT_DIR, 'irnet_final.pth')
