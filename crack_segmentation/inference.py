@@ -931,13 +931,11 @@ def main():
             stride=config.INFERENCE_STRIDE
         )
         
-        # Save CAM-only and CAM+IRN pseudo labels
-        cam_only_path = os.path.join(pseudo_dir, fname.replace('.jpg', '_cam_only.png'))
-        pseudo_path = os.path.join(pseudo_dir, fname.replace('.jpg', '_cam_irn_pseudo.png'))
-        cv2.imwrite(cam_only_path, cam_only)
+        # Save only CAM+IRN pseudo label using original filename (e.g., 017.png)
+        pseudo_name = os.path.splitext(fname)[0] + '.png'
+        pseudo_path = os.path.join(pseudo_dir, pseudo_name)
         cv2.imwrite(pseudo_path, pseudo)
-        print(f"   ✅ CAM-only label saved: {cam_only_path}")
-        print(f"   ✅ CAM+IRN label saved: {pseudo_path}")
+        print(f"   ✅ Pseudo label (CAM+IRN) saved: {pseudo_path}")
         
         # Visualize
         if config.SAVE_VISUALIZATIONS:
@@ -959,18 +957,19 @@ def main():
             
             print(f"\n   📊 Metrics:")
             print(f"      CAM-only  IoU/Prec/Rec/F1: {metrics_cam['IoU']:.4f} / {metrics_cam['Precision']:.4f} / {metrics_cam['Recall']:.4f} / {metrics_cam['F1']:.4f}")
-            print(f"      CAM+IRN   IoU/Prec/Rec/F1: {metrics_irn['IoU']:.4f} / {metrics_irn['Precision']:.4f} / {metrics_irn['Recall']:.4f} / {metrics_irn['F1']:.4f}")
+            print(f"      CAM+IRN IoU/Prec/Rec/F1: {metrics_irn['IoU']:.4f} / {metrics_irn['Precision']:.4f} / {metrics_irn['Recall']:.4f} / {metrics_irn['F1']:.4f}")
     
     # Average metrics
     if all_metrics_cam_irn:
         print(f"\n{'='*60}")
         print("AVERAGE METRICS")
         print(f"{'='*60}")
-        
+
         avg_metrics_cam = {
             key: np.mean([m[key] for m in all_metrics_cam_only])
             for key in ['IoU', 'Precision', 'Recall', 'F1']
         }
+        
         avg_metrics_irn = {
             key: np.mean([m[key] for m in all_metrics_cam_irn])
             for key in ['IoU', 'Precision', 'Recall', 'F1']
@@ -987,13 +986,14 @@ def main():
         cam_summary = save_and_visualize_overall_metrics(
             all_metrics_cam_only, config.OUTPUT_DIR, prefix='cam_only'
         )
+
         irn_summary = save_and_visualize_overall_metrics(
             all_metrics_cam_irn, config.OUTPUT_DIR, prefix='cam_irn'
         )
 
         if cam_summary is not None and irn_summary is not None:
             cmp_path = save_comparison_metrics_plot(cam_summary, irn_summary, config.OUTPUT_DIR)
-            print(f"\n📊 CAM-only overall plot: {cam_summary['plot_path']}")
+            print(f"📊 CAM-only overall plot: {cam_summary['plot_path']}")
             print(f"📊 CAM+IRN overall plot: {irn_summary['plot_path']}")
             print(f"📊 Comparison plot: {cmp_path}")
             print(f"🧾 CAM-only per-image CSV: {cam_summary['per_image_csv']}")

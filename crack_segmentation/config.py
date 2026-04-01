@@ -5,6 +5,7 @@ Dataset: 4032x3024 resolution crack images with ground truth masks
 Framework: IRNet (Ahn et al., CVPR 2019) adapted for crack detection
 """
 
+import os
 import torch
 
 # ============================================================
@@ -156,3 +157,20 @@ SAVE_VISUALIZATIONS = True          # Save intermediate visualizations
 
 # Metrics
 COMPUTE_METRICS = True              # Compute IoU, Precision, Recall, F1
+
+# ============================================================
+# STAGE 5: RESNET50-UNET TRAINING (FROM PSEUDO LABELS)
+# ============================================================
+# Stage 5 uses original images + pseudo labels generated in Stage 4
+STAGE5_IMAGE_DIR = IMG_DIR
+STAGE5_LABEL_DIR = os.path.join(OUTPUT_DIR, 'pseudo_labels')
+STAGE5_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'stage5_unet')
+STAGE5_TEST_IMAGE_DIR = 'data/images1'
+STAGE5_TEST_MASK_DIR = 'data/masks1'
+
+# Training params
+STAGE5_EPOCHS = 30
+STAGE5_BATCH_SIZE = 8
+STAGE5_LR = 0.1
+STAGE5_PATCH_SIZE = 224
+STAGE5_PATCHES_PER_IMG = 20
