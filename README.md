@@ -25,33 +25,54 @@ Stage 4: Pseudo Label Synthesis
     ├─ Extract CAM + Edge + Displacement
     ├─ Random walk propagation
     └─ Generate pseudo instance masks
+          ↓
+Stage 5: ResNet50-UNet Training
+    ├─ Use pseudo labels as supervision
+    └─ Train crack segmentation UNet (Stage 5)
+          ↓
+Stage 5v: UNet Visualization & Evaluation
+    ├─ Plot training curves (loss, IoU, F1)
+    └─ Visualize predictions vs ground truth on test set
 ```
 
-## 📁 Project Structure
+## 📁 Project Structure (Current)
+
+Struktur repo saat ini:
 
 ```
 ├── crack_segmentation/
-│   ├── config.py                # Konfigurasi dataset dan training
-│   ├── dataset.py               # Dataset classes dan data loading
-│   ├── path_index.py            # PathIndex untuk IRNet (dari referensi)
-│   ├── resnet50.py              # ResNet50 backbone (dari referensi)
-│   ├── resnet50_cam.py          # CAM network (dari referensi)
-│   ├── resnet50_irn.py          # IRNet model (dari referensi)
-│   ├── train_stage1.py          # Training script Stage 1
-│   ├── train_stage2_3.py        # Training script Stage 2+3
-│   ├── inference.py             # Inference script Stage 4
-│   ├── main.py                  # Main pipeline script            
+│   ├── config.py                # Konfigurasi dataset & training
+│   ├── dataset.py               # Dataset classes & data loading
+│   ├── path_index.py            # PathIndex untuk IRNet
+│   ├── resnet50.py              # ResNet50 backbone
+│   ├── resnet50_cam.py          # CAM network
+│   ├── resnet50_irn.py          # IRNet model (edge + displacement)
+│   ├── train_stage1.py          # Stage 1: Train CAM
+│   ├── train_stage2_3.py        # Stage 2+3: Mine relations + IRNet
+│   ├── train_stage5.py          # Stage 5: Train ResNet50-UNet
+│   ├── stage5_visualize.py      # Stage 5: Visualisasi hasil UNet
+│   ├── inference.py             # Stage 4: Pseudo label synthesis
+│   ├── main.py                  # Main pipeline script
+│   ├── quick_test.py            # Quick sanity check environment
+│   ├── example_usage.py         # Contoh penggunaan end-to-end
+│   ├── requirements.txt         # Dependency Python (untuk pip)
 │   │
-│   ├── data/                    # Data directory
+│   ├── data/                    # (Opsional) salinan data lokal
 │   │   ├── images/              # Crack images (4032x3024)
-│   │   └── masks/               # Ground truth masks
+│   │   └── masks/               # Ground truth masks (binary)
 │   │
-│   └── outputs/                 # Output directory
+│   └── outputs/                 # Output utama pipeline
 │       ├── cam_net_best.pth     # Best CAM model
+│       ├── cam_net_final.pth
 │       ├── irnet_best.pth       # Best IRNet model
-│       ├── pseudo_labels/       # Generated pseudo labels
-│       └── visualizations/      # Visualization outputs
+│       ├── irnet_final.pth
+│       ├── pseudo_labels/       # Folder pseudo labels hasil
+│       ├── stage5_unet/         # UNet dari pseudo labels CAM only
+│       ├── stage5_unet_irn/     # UNet berbasis pseudo labels CAM+IRN 
+│       └── visualizations/      # Semua visualisasi antar stage         
+│
 ├── Dockerfile
+├── run_docker.md
 ├── README.md
 ├── .gitignore
 ```
@@ -60,25 +81,33 @@ Stage 4: Pseudo Label Synthesis
 
 ### Quick Test
 
+Semua perintah Python di bawah ini dijalankan dari folder `crack_segmentation/`.
+
 ```bash
-# Test semua components
+cd crack_segmentation
+
+# Test semua komponen & environment
 python quick_test.py
 
-# Run example usage
+# Run example usage (contoh-contoh umum)
 python example_usage.py
 ```
 
 ## 🚀 Quick Start
 
-### 1. Run Docker
+### 1. Run Docker (Opsional)
+
+Jalankan dari root repo (`crack_segmentation_docker/`):
 
 ```bash
 docker run --gpus all -it \
-  --shm-size=8g \
-  -v "$(pwd -W)/crack_segmentation:/workspace/crack_segmentation" \
-  -v "$(pwd -W)/data:/workspace/data" \
-  crack-irn:py310
+    --shm-size=8g \
+    -v "$(pwd -W)/crack_segmentation:/workspace/crack_segmentation" \
+    -v "$(pwd -W)/data:/workspace/data" \
+    crack-irn:py310
 ```
+
+Detail tambahan lihat `run_docker.md`.
 
 ### 2. Prepare Dataset
 
@@ -100,45 +129,54 @@ data/
 
 ### 3. Configure Settings
 
-Edit `config.py` untuk menyesuaikan path dan parameters:
+Edit `crack_segmentation/config.py` untuk menyesuaikan path dan parameters
+(default-nya sudah diset sesuai struktur di atas):
 
 ```python
-# Dataset paths
-IMG_DIR = "data/images"
-MASK_DIR = "data/masks"
-OUTPUT_DIR = "outputs"
+# Dataset paths (relatif terhadap root repo)
+IMG_DIR = "data/images"      # Folder gambar
+MASK_DIR = "data/masks"      # Folder ground truth mask
+OUTPUT_DIR = "outputs"       # Akan dibuat di dalam crack_segmentation/
 
-# Training parameters
-CAM_EPOCHS = 25
-IRN_EPOCHS = 20
+# Training parameters utama
+CAM_EPOCHS = 50
+IRN_EPOCHS = 50
 PATCH_SIZE = 512
 PATCH_STRIDE = 256
 ```
 
 ### 4. Run Pipeline
 
+Semua perintah berikut dijalankan dari folder `crack_segmentation/`.
+
 #### Option A: Run Full Pipeline
 
 ```bash
+cd crack_segmentation
 python main.py --stage all
 ```
 
 #### Option B: Run Stage by Stage
 
 ```bash
-# Stage 1: Train CAM network
+cd crack_segmentation
+
+# Stage 1: Train CAM network (classification + CAM)
 python main.py --stage 1
 
-# Stage 2+3: Train IRNet
+# Stage 2+3: Mine inter-pixel relations + train IRNet
 python main.py --stage 2
 
-# Jika model cam dan IRN sudah trained
+# Stage 4 (alias --stage 3 di kode): generate pseudo labels
+python main.py --stage 3
+
+# Jika hanya ingin inference (tanpa retrain)
 python main.py --inference
 
-# Stage 5: Train UNet
+# Stage 5: Train ResNet50-UNet dari pseudo labels
 python main.py --stage 5
 
-# Visualisasi Hasil Unet
+# Stage 5 Visualization: curve training + contoh segmentasi
 python main.py --stage 5v
 ```
 
@@ -147,16 +185,23 @@ python main.py --stage 5v
 Setiap stage menghasilkan visualizations:
 
 **Stage 1**: Training curves (loss, accuracy)
+
 **Stage 2+3**: Loss decomposition (affinity, displacement)
-**Stage 4**: 
+
+**Stage 4** (pseudo label synthesis): 
 - Original image
 - CAM heatmap
 - Boundary map
 - Displacement field
-- Pseudo label
+- Pseudo label (CAM only and CAM+IRN)
 - Overlay
 
-Visualizations disimpan di `outputs/visualizations/`
+**Stage 5**: 
+- Training curves ResNet50-UNet (loss, IoU, F1)
+- Prediksi vs ground truth di test set
+
+Visualizations disimpan di `crack_segmentation/outputs/visualizations/` dan
+subfolder terkait (misal: `stage5_unet/test_visualizations/`).
 
 ## 📈 Evaluation Metrics
 
@@ -179,22 +224,8 @@ IMG_WIDTH = 3024
 # Patch extraction
 PATCH_SIZE = 512          # Patch size untuk training
 PATCH_STRIDE = 256        # Overlap = PATCH_SIZE - PATCH_STRIDE
-MIN_CRACK_RATIO = 0.03    # Min crack ratio untuk positive patch
 
-# Inference
-INFERENCE_PATCH_SIZE = 512
-INFERENCE_STRIDE = 256    # Lebih kecil = lebih smooth tapi lebih lambat
 ```
-
-## 📝 Implementation Notes
-
-### Perbedaan dengan Original IRNet
-
-1. **Dataset**: Original menggunakan PASCAL VOC (multi-class), implementasi ini untuk binary crack detection
-2. **Resolution**: Original 320x320 patches, implementasi ini support 4032x3024 full images
-3. **Sliding Window**: Implementasi patch-based processing untuk handle large images
-4. **Simplifikasi**: Inter-pixel relation mining disederhanakan untuk efficiency
-
 
 ## 📚 References
 
@@ -207,8 +238,4 @@ INFERENCE_STRIDE = 256    # Lebih kecil = lebih smooth tapi lebih lambat
 
 Kode ini dibuat untuk tujuan penelitian dan edukasi. Silakan gunakan dan modifikasi sesuai kebutuhan.
 
-## 🙏 Acknowledgments
-
-- Original IRNet implementation oleh Jiwoon Ahn
-- ResNet50 pretrained weights dari PyTorch Model Zoo
 
