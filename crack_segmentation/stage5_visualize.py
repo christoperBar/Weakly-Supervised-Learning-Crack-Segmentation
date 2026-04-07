@@ -23,6 +23,7 @@ from PIL import Image
 from tqdm import tqdm
 
 import config
+from dataset import get_image_splits
 from tesunet import ResNet50UNet, neighborhood_fusion
 
 
@@ -176,9 +177,20 @@ def main():
     os.makedirs(test_pred_dir, exist_ok=True)
     os.makedirs(test_vis_dir, exist_ok=True)
 
-    test_images = _list_images(config.STAGE5_TEST_IMAGE_DIR)
+    # Gunakan test split yang sama dengan Stage 1/2
+    _, _, test_files = get_image_splits(
+        img_dir=config.IMG_DIR,
+        n_train=config.N_TRAIN_IMAGES,
+        n_val=config.N_VAL_IMAGES,
+        n_test=config.N_TEST_IMAGES,
+        seed=config.RANDOM_SEED,
+    )
+    test_images = [Path(config.IMG_DIR) / f for f in test_files]
+
     if not test_images:
-        raise RuntimeError(f"No test images found in {config.STAGE5_TEST_IMAGE_DIR}")
+        raise RuntimeError(
+            f"No test images found from split in {config.IMG_DIR} with N_TEST_IMAGES={config.N_TEST_IMAGES}"
+        )
 
     model = ResNet50UNet(num_classes=2, pretrained=False).to(device)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -204,7 +216,8 @@ def main():
         pred_path = os.path.join(test_pred_dir, pred_name)
         Image.fromarray(pred_u8).save(pred_path)
 
-        gt_path = _find_mask(config.STAGE5_TEST_MASK_DIR, img_path)
+        # GT untuk test: gunakan MASK_DIR (ground truth asli)
+        gt_path = _find_mask(config.MASK_DIR, img_path)
         gt_mask = None
         if gt_path is not None:
             gt_mask = np.array(Image.open(gt_path).convert("L"))
@@ -223,9 +236,10 @@ def main():
         crack = pred_mask > 0
         overlay[crack] = (0.55 * overlay[crack] + 0.45 * np.array([255, 0, 0])).astype(np.uint8)
 
-        cols = 4 if gt_mask is not None else 3
+        # Tambahkan panel khusus untuk mask biner selain overlay
+        cols = 5 if gt_mask is not None else 4
         fig, axes = plt.subplots(1, cols, figsize=(4.5 * cols, 4.5))
-        if cols == 3:
+        if cols == 4:
             axes = list(axes)
 
         axes[0].imshow(image_np)
@@ -236,14 +250,18 @@ def main():
         axes[1].set_title("Crack Probability")
         axes[1].axis("off")
 
-        axes[2].imshow(overlay)
-        axes[2].set_title("Prediction Overlay")
+        axes[2].imshow(pred_u8, cmap="gray")
+        axes[2].set_title("Binary Prediction")
         axes[2].axis("off")
 
+        axes[3].imshow(overlay)
+        axes[3].set_title("Prediction Overlay")
+        axes[3].axis("off")
+
         if gt_mask is not None:
-            axes[3].imshow(gt_mask, cmap="gray")
-            axes[3].set_title("Ground Truth")
-            axes[3].axis("off")
+            axes[4].imshow(gt_mask, cmap="gray")
+            axes[4].set_title("Ground Truth")
+            axes[4].axis("off")
 
         plt.tight_layout()
         vis_path = os.path.join(test_vis_dir, f"{img_path.stem}_vis.png")

@@ -132,13 +132,14 @@ python main.py --stage 1
 # Stage 2+3: Train IRNet
 python main.py --stage 2
 
-```
-
-#### Option C: Inference Only
-
-```bash
-# Jika model sudah trained
+# Jika model cam dan IRN sudah trained
 python main.py --inference
+
+# Stage 5: Train UNet
+python main.py --stage 5
+
+# Visualisasi Hasil Unet
+python main.py --stage 5v
 ```
 
 ## 🎨 Visualization

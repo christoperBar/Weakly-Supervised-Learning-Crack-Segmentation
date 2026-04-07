@@ -165,8 +165,8 @@ COMPUTE_METRICS = True              # Compute IoU, Precision, Recall, F1
 STAGE5_IMAGE_DIR = IMG_DIR
 STAGE5_LABEL_DIR = os.path.join(OUTPUT_DIR, 'pseudo_labels')
 STAGE5_OUTPUT_DIR = os.path.join(OUTPUT_DIR, 'stage5_unet')
-STAGE5_TEST_IMAGE_DIR = 'data/images1'
-STAGE5_TEST_MASK_DIR = 'data/masks1'
+STAGE5_TEST_IMAGE_DIR = 'data/images'
+STAGE5_TEST_MASK_DIR = 'data/masks'
 
 # Training params
 STAGE5_EPOCHS = 30

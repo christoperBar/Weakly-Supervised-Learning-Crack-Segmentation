@@ -49,6 +49,9 @@ import random
 import json
 from tqdm import tqdm
 
+import config
+from dataset import get_image_splits
+
 
 # ============================================================
 # 1. DATASET — Full-size image, crop patch on-the-fly
@@ -380,7 +383,12 @@ def neighborhood_fusion(model, image_np, device,
         prob_map   : numpy [H, W], float32 (probabilitas kelas crack)
     """
     H, W = image_np.shape[:2]
-    prob_acc = np.full((H, W), -np.inf, dtype=np.float32)
+
+    # Accumulator untuk rata-rata probabilitas (bukan max) supaya
+    # prediksi antar patch yang berbeda tidak langsung dipilih yang
+    # paling tinggi dan menghasilkan noise berlebihan.
+    prob_sum = np.zeros((H, W), dtype=np.float32)
+    prob_count = np.zeros((H, W), dtype=np.float32)
 
     normalize = transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -410,15 +418,19 @@ def neighborhood_fusion(model, image_np, device,
             probs_np = probs.cpu().numpy()
 
             for j, (y, x) in enumerate(batch_coords):
-                # Max-probability fusion (Section 3.6)
-                prob_acc[y:y+patch_size, x:x+patch_size] = np.maximum(
-                    prob_acc[y:y+patch_size, x:x+patch_size],
-                    probs_np[j]
-                )
+                # Sum + count untuk rata-rata probabilitas di area overlap
+                prob_sum[y:y+patch_size, x:x+patch_size] += probs_np[j]
+                prob_count[y:y+patch_size, x:x+patch_size] += 1.0
 
-    prob_acc[prob_acc == -np.inf] = 0.0
-    pred_mask = (prob_acc > 0.5).astype(np.uint8)
-    return pred_mask, prob_acc
+    # Hindari pembagian dengan nol; piksel tanpa patch (seharusnya tidak ada)
+    # akan diberi probabilitas 0.
+    prob_count[prob_count == 0] = 1.0
+    prob_mean = prob_sum / prob_count
+
+    # Threshold sedikit lebih tinggi karena rata-rata biasanya
+    # menghasilkan probabilitas yang lebih moderat dibanding max.
+    pred_mask = (prob_mean > 0.45).astype(np.uint8)
+    return pred_mask, prob_mean
 
 
 # ============================================================
@@ -476,20 +488,20 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Device: {device}")
 
-    # ---------- Split train/val dari daftar gambar ----------
-    exts = ["*.png", "*.jpg", "*.jpeg", "*.JPG", "*.PNG", "*.JPEG"]
-    all_paths = []
-    for ext in exts:
-        all_paths += list(Path(args.image_dir).glob(ext))
-    all_paths = sorted(set(all_paths))
+    # ---------- Split train/val/test konsisten dengan stage lain ----------
+    # Menggunakan fungsi get_image_splits dari dataset.py
+    train_files, val_files, test_files = get_image_splits(
+        img_dir=args.image_dir,
+        n_train=config.N_TRAIN_IMAGES,
+        n_val=config.N_VAL_IMAGES,
+        n_test=config.N_TEST_IMAGES,
+        seed=config.RANDOM_SEED,
+    )
 
-    random.seed(42)
-    random.shuffle(all_paths)
+    train_paths = [Path(args.image_dir) / f for f in train_files]
+    val_paths = [Path(args.image_dir) / f for f in val_files]
 
-    val_n       = max(1, int(0.2 * len(all_paths)))
-    val_paths   = all_paths[:val_n]
-    train_paths = all_paths[val_n:]
-    print(f"[INFO] Train: {len(train_paths)} gambar | Val: {len(val_paths)} gambar")
+    print(f"[INFO] Train: {len(train_paths)} gambar | Val: {len(val_paths)} gambar | Test (tidak dipakai di Stage 5 train): {len(test_files)} gambar")
 
     # ---------- Dataset & DataLoader ----------
     train_ds = CrackFullImageDataset(

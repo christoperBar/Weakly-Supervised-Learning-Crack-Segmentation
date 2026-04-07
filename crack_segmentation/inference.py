@@ -854,9 +854,11 @@ def main():
     
     # Create output directories
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    pseudo_dir = os.path.join(config.OUTPUT_DIR, 'pseudo_labels')
+    pseudo_dir_cam_only = os.path.join(config.OUTPUT_DIR, 'pseudo_labels_cam_only')
+    pseudo_dir_cam_irn = os.path.join(config.OUTPUT_DIR, 'pseudo_labels_cam_irn')
     vis_dir = os.path.join(config.OUTPUT_DIR, 'visualizations')
-    os.makedirs(pseudo_dir, exist_ok=True)
+    os.makedirs(pseudo_dir_cam_only, exist_ok=True)
+    os.makedirs(pseudo_dir_cam_irn, exist_ok=True)
     os.makedirs(vis_dir, exist_ok=True)
     
     # Load models
@@ -931,11 +933,14 @@ def main():
             stride=config.INFERENCE_STRIDE
         )
         
-        # Save only CAM+IRN pseudo label using original filename (e.g., 017.png)
+        # Save CAM-only and CAM+IRN pseudo labels using original filename (e.g., 017.png)
         pseudo_name = os.path.splitext(fname)[0] + '.png'
-        pseudo_path = os.path.join(pseudo_dir, pseudo_name)
-        cv2.imwrite(pseudo_path, pseudo)
-        print(f"   ✅ Pseudo label (CAM+IRN) saved: {pseudo_path}")
+        cam_only_path = os.path.join(pseudo_dir_cam_only, pseudo_name)
+        pseudo_irn_path = os.path.join(pseudo_dir_cam_irn, pseudo_name)
+        cv2.imwrite(cam_only_path, cam_only)
+        cv2.imwrite(pseudo_irn_path, pseudo)
+        print(f"   ✅ Pseudo label (CAM only) saved: {cam_only_path}")
+        print(f"   ✅ Pseudo label (CAM+IRN) saved: {pseudo_irn_path}")
         
         # Visualize
         if config.SAVE_VISUALIZATIONS:
@@ -1000,7 +1005,8 @@ def main():
             print(f"🧾 CAM+IRN per-image CSV: {irn_summary['per_image_csv']}")
     
     print(f"\n✅ All done!")
-    print(f"   Pseudo labels saved in: {pseudo_dir}")
+    print(f"   CAM-only pseudo labels saved in: {pseudo_dir_cam_only}")
+    print(f"   CAM+IRN pseudo labels saved in: {pseudo_dir_cam_irn}")
     print(f"   Visualizations saved in: {vis_dir}")
 
 
