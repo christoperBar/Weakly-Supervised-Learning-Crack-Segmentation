@@ -14,9 +14,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# Import modules
 import config
-from dataset import CrackPatchDataset, get_train_transform
+from dataset import CrackPatchDataset, get_train_transform, get_image_splits
 from resnet50_cam import Net as CamNet, NUM_CLASSES
 
 
@@ -143,17 +142,21 @@ def plot_training_history(history, save_path='outputs/stage1_training.png'):
     
     # Loss plot
     ax1.plot(history['train_loss'], label='Train Loss', marker='o')
+    if len(history.get('val_loss', [])) > 0:
+        ax1.plot(history['val_loss'], label='Val Loss', marker='s')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
-    ax1.set_title('Training Loss')
+    ax1.set_title('Loss')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
     # Accuracy plot
     ax2.plot(history['train_acc'], label='Train Acc', marker='o')
+    if len(history.get('val_acc', [])) > 0:
+        ax2.plot(history['val_acc'], label='Val Acc', marker='s')
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('Accuracy (%)')
-    ax2.set_title('Training Accuracy')
+    ax2.set_title('Accuracy')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -179,6 +182,17 @@ def main():
     # Dataset
     print(f"\n📦 Loading dataset...")
     train_transform = get_train_transform()
+
+    # Bagi citra menjadi train/val/test berbasis jumlah citra
+    train_imgs, val_imgs, test_imgs = get_image_splits(
+        config.IMG_DIR,
+        n_train=config.N_TRAIN_IMAGES,
+        n_val=config.N_VAL_IMAGES,
+        n_test=config.N_TEST_IMAGES,
+        seed=config.RANDOM_SEED
+    )
+
+    # Dataset patch untuk train dan val (berbasis citra di masing-masing split)
     train_dataset = CrackPatchDataset(
         img_dir=config.IMG_DIR,
         mask_dir=config.MASK_DIR,
@@ -186,8 +200,20 @@ def main():
         stride=config.PATCH_STRIDE,
         transform=train_transform,
         max_neg_ratio=config.MAX_NEG_RATIO,
-        min_crack_ratio=config.MIN_CRACK_RATIO
+        min_crack_ratio=config.MIN_CRACK_RATIO,
+        img_files=train_imgs
     )
+
+    val_dataset = CrackPatchDataset(
+        img_dir=config.IMG_DIR,
+        mask_dir=config.MASK_DIR,
+        patch_size=config.PATCH_SIZE,
+        stride=config.PATCH_STRIDE,
+        transform=train_transform,
+        max_neg_ratio=config.MAX_NEG_RATIO,
+        min_crack_ratio=config.MIN_CRACK_RATIO,
+        img_files=val_imgs
+    ) if len(val_imgs) > 0 else None
     
     train_loader = DataLoader(
         train_dataset,
@@ -196,9 +222,21 @@ def main():
         num_workers=config.NUM_WORKERS,
         pin_memory=config.PIN_MEMORY
     )
-    
-    print(f"   Batch size: {config.CAM_BATCH_SIZE}")
-    print(f"   Batches per epoch: {len(train_loader)}")
+
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.CAM_BATCH_SIZE,
+            shuffle=False,
+            num_workers=config.NUM_WORKERS,
+            pin_memory=config.PIN_MEMORY
+        )
+        print(f"   Train batches per epoch: {len(train_loader)}")
+        print(f"   Val batches per epoch:   {len(val_loader)}")
+    else:
+        val_loader = None
+        print(f"   Batch size: {config.CAM_BATCH_SIZE}")
+        print(f"   Batches per epoch: {len(train_loader)}")
     
     # Model
     print(f"\n🏗️  Building model...")
@@ -229,14 +267,20 @@ def main():
     print(f"\n🚀 Starting training...")
     print(f"   Epochs: {config.CAM_EPOCHS}")
     print(f"   Learning rate: {config.CAM_LR}")
+    print(f"   Early stopping: {config.EARLY_STOPPING_ENABLED}")
+    if config.EARLY_STOPPING_ENABLED:
+        print(f"   Patience: {config.CAM_EARLY_STOP_PATIENCE}, Min delta: {config.CAM_EARLY_STOP_MIN_DELTA}")
     
     history = {
         'train_loss': [],
-        'train_acc': []
+        'train_acc': [],
+        'val_loss': [],
+        'val_acc': []
     }
     
-    best_acc = 0
+    best_metric = 0  # bisa pakai val_acc atau F1 jika tersedia
     best_epoch = 0
+    no_improve_epochs = 0
     
     for epoch in range(config.CAM_EPOCHS):
         print(f"\n{'='*60}")
@@ -247,10 +291,21 @@ def main():
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch
         )
+
+        # Validation (jika ada val_loader)
+        if val_loader is not None:
+            val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate(
+                model, val_loader, criterion, device
+            )
+        else:
+            val_loss = val_acc = val_prec = val_rec = val_f1 = None
         
         # Update history
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
+        if val_loss is not None:
+            history['val_loss'].append(val_loss)
+            history['val_acc'].append(val_acc)
         
         # Learning rate step
         scheduler.step()
@@ -259,12 +314,22 @@ def main():
         print(f"\n📈 Epoch {epoch+1} Summary:")
         print(f"   Train Loss: {train_loss:.4f}")
         print(f"   Train Acc: {train_acc:.2f}%")
+        if val_loss is not None:
+            print(f"   Val Loss:   {val_loss:.4f}")
+            print(f"   Val Acc:    {val_acc:.2f}%")
+            print(f"   Val F1(crack): {val_f1:.4f}")
         print(f"   Learning Rate: {current_lr:.2e}")
         
-        # Save best model
-        if train_acc > best_acc:
-            best_acc = train_acc
+        # Save best model (berdasarkan val F1 jika ada, else train_acc)
+        if val_f1 is not None:
+            current_metric = val_f1
+        else:
+            current_metric = train_acc
+
+        if current_metric > (best_metric + config.CAM_EARLY_STOP_MIN_DELTA):
+            best_metric = current_metric
             best_epoch = epoch + 1
+            no_improve_epochs = 0
             save_path = os.path.join(config.OUTPUT_DIR, 'cam_net_best.pth')
             torch.save({
                 'epoch': epoch,
@@ -272,8 +337,20 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'train_acc': train_acc,
                 'train_loss': train_loss,
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'val_f1': val_f1,
             }, save_path)
-            print(f"   💾 Best model saved! (Acc: {best_acc:.2f}%)")
+            print(f"   💾 Best model saved! (metric={best_metric:.4f})")
+        else:
+            no_improve_epochs += 1
+            if config.EARLY_STOPPING_ENABLED:
+                print(
+                    f"   ⏳ No improvement for {no_improve_epochs}/{config.CAM_EARLY_STOP_PATIENCE} epochs"
+                )
+                if no_improve_epochs >= config.CAM_EARLY_STOP_PATIENCE:
+                    print("\n🛑 Early stopping triggered on Stage 1 training")
+                    break
     
     # Save final model
     final_path = os.path.join(config.OUTPUT_DIR, 'cam_net_final.pth')
@@ -293,8 +370,8 @@ def main():
     print("\n" + "=" * 60)
     print("TRAINING COMPLETED")
     print("=" * 60)
-    print(f"Best Accuracy: {best_acc:.2f}% (Epoch {best_epoch})")
-    print(f"Final Accuracy: {train_acc:.2f}%")
+    print(f"Best epoch: {best_epoch} (metric={best_metric:.4f})")
+    print(f"Final Train Accuracy: {train_acc:.2f}%")
     print(f"Models saved in: {config.OUTPUT_DIR}")
     
     return model

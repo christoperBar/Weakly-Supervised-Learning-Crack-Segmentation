@@ -77,6 +77,41 @@ def run_inference():
     run_inference_main()
 
 
+def run_stage5():
+    """Stage 5: Train ResNet50-UNet using pseudo labels"""
+    print("\n" + "="*60)
+    print("STAGE 5: Train ResNet50-UNet from Pseudo Labels")
+    print("="*60)
+
+    pseudo_dir = os.path.join(config.OUTPUT_DIR, 'pseudo_labels')
+    if not os.path.exists(pseudo_dir):
+        print(f"\n❌ Error: Pseudo label directory not found at {pseudo_dir}")
+        print("   Please run Stage 3 first to generate pseudo labels!")
+        sys.exit(1)
+
+    pseudo_files = [
+        f for f in os.listdir(pseudo_dir)
+        if f.lower().endswith('.png')
+    ]
+    if len(pseudo_files) == 0:
+        print(f"\n❌ Error: No pseudo labels found in {pseudo_dir}")
+        print("   Please run Stage 3 first to generate pseudo labels!")
+        sys.exit(1)
+
+    from train_stage5 import main as run_stage5_main
+    run_stage5_main()
+
+
+def run_stage5_visualization():
+    """Stage 5 Visualization: training curves + test segmentation outputs"""
+    print("\n" + "="*60)
+    print("STAGE 5 VISUALIZATION: Curves + Test Segmentation")
+    print("="*60)
+
+    from stage5_visualize import main as run_stage5_vis_main
+    run_stage5_vis_main()
+
+
 def verify_setup():
     """Verify dataset and directory structure"""
     print("\n🔍 Verifying setup...")
@@ -146,9 +181,9 @@ def main():
     parser.add_argument(
         '--stage',
         type=str,
-        choices=['all', '1', '2', '3'],
+        choices=['all', '1', '2', '3', '5', '5v'],
         default='all',
-        help='Which stage to run (all/1/2/3)'
+        help='Which stage to run (all/1/2/3/5/5v)'
     )
     parser.add_argument(
         '--inference',
@@ -190,6 +225,7 @@ def main():
         run_stage1()
         run_stage2_3()
         run_inference()
+        run_stage5()
         
         print("\n" + "="*60)
         print("✅ PIPELINE COMPLETED!")
@@ -216,6 +252,20 @@ def main():
         
         print("\n✅ Stage 4 completed!")
         print(f"   Pseudo labels saved in: {config.OUTPUT_DIR}/pseudo_labels")
+
+    elif args.stage == '5':
+        # Stage 5 (ResNet50-UNet training) only
+        run_stage5()
+
+        print("\n✅ Stage 5 completed!")
+        print(f"   Stage 5 checkpoints saved in: {config.STAGE5_OUTPUT_DIR}")
+
+    elif args.stage == '5v':
+        # Stage 5 visualization only
+        run_stage5_visualization()
+
+        print("\n✅ Stage 5 visualization completed!")
+        print(f"   Visualization output saved in: {config.STAGE5_OUTPUT_DIR}")
 
 
 if __name__ == "__main__":

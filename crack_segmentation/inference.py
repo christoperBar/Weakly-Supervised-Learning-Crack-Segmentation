@@ -11,6 +11,7 @@ Output: Pseudo segmentation masks
 """
 
 import os
+import csv
 import cv2
 import numpy as np
 import torch
@@ -299,14 +300,47 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
             B_resized = cv2.resize(B, (W, H))
         else:
             B_resized = B
+
+        # Restorative fusion: use IRN signal to recover weak/thin crack segments
+        # near high-confidence CAM seeds, instead of globally suppressing CAM.
+        B_norm = np.clip(B_resized, 0.0, 1.0)
+        seed = (cam_enhanced >= config.IRN_RESTORE_SEED_THRESH).astype(np.uint8)
+
+        if config.IRN_RESTORE_DILATION > 0:
+            k = 2 * config.IRN_RESTORE_DILATION + 1
+            seed_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+            support_region = cv2.dilate(seed, seed_kernel, iterations=1).astype(np.float32)
+        else:
+            support_region = seed.astype(np.float32)
+
+        irn_support = B_norm * support_region
+
+        # Keep only IRN-support components connected to CAM seed anchors.
+        support_bin = (irn_support >= config.IRN_RESTORE_SUPPORT_THRESH).astype(np.uint8)
+        ak = 2 * config.IRN_RESTORE_CONNECT_DILATION + 1
+        anchor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ak, ak))
+        seed_anchor = cv2.dilate(seed, anchor_kernel, iterations=1)
+
+        n_cc, cc_map = cv2.connectedComponents(support_bin, connectivity=8)
+        connected_support = np.zeros_like(support_bin, dtype=np.uint8)
+        for cc_id in range(1, n_cc):
+            cc_mask = (cc_map == cc_id)
+            if np.any(seed_anchor[cc_mask] > 0):
+                connected_support[cc_mask] = 1
+
+        # Bridge tiny gaps in recovered support without noticeably thickening.
+        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        connected_support = cv2.morphologyEx(connected_support, cv2.MORPH_CLOSE, bridge_kernel, iterations=1)
+
+        # Restore mostly low-confidence CAM areas so existing strong crack does not bloat.
+        low_conf_mask = (cam_enhanced < config.IRN_RESTORE_LOW_CONF_THRESH).astype(np.float32)
+        restoration = connected_support.astype(np.float32) * irn_support * low_conf_mask
+        cam_hybrid = cam_enhanced + (restoration * config.IRN_RESTORE_GAIN * (1.0 - cam_enhanced))
+        cam_hybrid = np.clip(cam_hybrid, 0.0, 1.0)
         
-        # Suppress CAM activations at boundary locations
-        # High boundary probability → likely edge → suppress crack activation
-        boundary_mask = 1.0 - (B_resized * config.BOUNDARY_SUPPRESSION_WEIGHT)
-        cam_hybrid = cam_enhanced * boundary_mask
-        
-        print(f"   [DEBUG synthesize] Applied boundary refinement")
+        print(f"   [DEBUG synthesize] Applied restorative CAM+IRN fusion")
         print(f"   [DEBUG synthesize] B min/max: {B_resized.min():.4f}/{B_resized.max():.4f}")
+        print(f"   [DEBUG synthesize] recover support ratio: {connected_support.mean():.4f}")
         print(f"   [DEBUG synthesize] cam_hybrid min/max: {cam_hybrid.min():.4f}/{cam_hybrid.max():.4f}")
         
         cam_enhanced = cam_hybrid
@@ -317,8 +351,8 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
         cam_enhanced = apply_densecrf(img_rgb, cam_enhanced)
         print(f"   [DEBUG synthesize] After DenseCRF min/max: {cam_enhanced.min():.4f}/{cam_enhanced.max():.4f}")
     
-    # Gaussian smoothing to reduce noise
-    cam_smooth = cv2.GaussianBlur(cam_enhanced, (5, 5), 0)
+    # Light smoothing to preserve thin crack structure
+    cam_smooth = cv2.GaussianBlur(cam_enhanced, (3, 3), 0)
     
     # Otsu thresholding with adjustment
     cam_uint8 = (cam_smooth * 255).astype(np.uint8)
@@ -333,17 +367,28 @@ def synthesize_pseudo_label(cam, D, B, img_rgb=None,
         print(f"   [DEBUG synthesize] Adjusted threshold: {thresh_val}, pixels above: {(binary > 0).sum()}")
     
     # Gentle morphological operations to preserve thin crack structure
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # REDUCED from (9,9)
+    if B is not None:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        close_iter = 1
+    else:
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        close_iter = 2
     kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))   # REDUCED from (3,3)
-    
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=1)  # REDUCED from 3
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open, iterations=1)
+
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=close_iter)
+
+    # For CAM+IRN path, skip MORPH_OPEN to avoid breaking thin recovered links.
+    if B is None:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open, iterations=1)
     
     print(f"   [DEBUG synthesize] After morphology pixels: {(binary > 0).sum()}")
     
     # Remove small noise components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    min_size = max(200, (H * W) // 8000)  # Adaptive size threshold
+    if B is not None:
+        min_size = max(30, (H * W) // 40000)  # Keep thin recovered fragments for CAM+IRN
+    else:
+        min_size = max(80, (H * W) // 20000)  # Less aggressive filtering for thin cracks
     
     print(f"   [DEBUG synthesize] Connected components: {num_labels-1}, min_size: {min_size}")
     
@@ -442,6 +487,29 @@ def apply_displacement_clustering(binary_mask, displacement_field):
     return refined_mask
 
 
+def _sliding_positions(length, patch_size, stride):
+    """Generate sliding-window start indices with guaranteed edge coverage."""
+    if length <= patch_size:
+        return [0]
+
+    positions = list(range(0, length - patch_size + 1, stride))
+    last_start = length - patch_size
+    if positions[-1] != last_start:
+        positions.append(last_start)
+    return positions
+
+
+def _build_patch_weight(patch_size):
+    """Build smooth 2D blending weights to reduce seam artifacts."""
+    w = np.hanning(patch_size).astype(np.float32)
+    if np.all(w == 0):
+        w = np.ones((patch_size,), dtype=np.float32)
+    weight = np.outer(w, w)
+    weight = np.clip(weight, 1e-3, None)
+    weight = weight / (weight.max() + 1e-8)
+    return weight
+
+
 def process_full_image(img_rgb, cam_net, irnet, transform, device,
                       patch_size=512, stride=256):
     """
@@ -460,7 +528,8 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
         cam_full: (H, W) accumulated CAM
         B_full: (H, W) accumulated boundary map
         D_full: (H, W, 2) accumulated displacement field
-        pseudo_full: (H, W) final pseudo label
+        cam_only_full: (H, W) pseudo label from CAM only
+        pseudo_full: (H, W) final pseudo label from CAM+IRN
     """
     H, W = img_rgb.shape[:2]
     
@@ -469,11 +538,14 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
     B_accum = np.zeros((H, W), dtype=np.float32)
     D_accum = np.zeros((H, W, 2), dtype=np.float32)
     count = np.zeros((H, W), dtype=np.float32)
+    patch_weight = _build_patch_weight(patch_size)
     
     # Sliding window
     patches = []
-    for y in range(0, H - patch_size + 1, stride):
-        for x in range(0, W - patch_size + 1, stride):
+    y_positions = _sliding_positions(H, patch_size, stride)
+    x_positions = _sliding_positions(W, patch_size, stride)
+    for y in y_positions:
+        for x in x_positions:
             patches.append((y, x))
     
     print(f"   Processing {len(patches)} patches...")
@@ -506,11 +578,11 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
         D_resized[:, :, 0] = cv2.resize(D[:, :, 0], (patch_size, patch_size))
         D_resized[:, :, 1] = cv2.resize(D[:, :, 1], (patch_size, patch_size))
         
-        # Accumulate
-        cam_accum[y:y+patch_size, x:x+patch_size] += cam_resized
-        B_accum[y:y+patch_size, x:x+patch_size] += B_resized
-        D_accum[y:y+patch_size, x:x+patch_size] += D_resized
-        count[y:y+patch_size, x:x+patch_size] += 1
+        # Accumulate with smooth blending weights
+        cam_accum[y:y+patch_size, x:x+patch_size] += cam_resized * patch_weight
+        B_accum[y:y+patch_size, x:x+patch_size] += B_resized * patch_weight
+        D_accum[y:y+patch_size, x:x+patch_size] += D_resized * patch_weight[:, :, None]
+        count[y:y+patch_size, x:x+patch_size] += patch_weight
     
     # Average
     count[count == 0] = 1
@@ -540,7 +612,17 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
     
     img_rgb_ds = cv2.resize(img_rgb, (w_ds, h_ds))  # Downsample RGB for DenseCRF
     
-    # Synthesize pseudo label with DenseCRF refinement
+    # Synthesize CAM-only label
+    cam_only_full = synthesize_pseudo_label(
+        cam_ds, None, None,
+        img_rgb=img_rgb_ds,
+        beta=config.BETA,
+        t_walk=config.T_WALK,
+        bg_quantile=config.BG_QUANTILE,
+        b_penalty=config.B_PENALTY
+    )
+
+    # Synthesize CAM+IRN pseudo label with DenseCRF refinement
     pseudo_full = synthesize_pseudo_label(
         cam_ds, D_ds, B_ds,
         img_rgb=img_rgb_ds,  # Pass RGB image for DenseCRF
@@ -551,14 +633,15 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
     )
     
     # Resize back to full size
+    cam_only_full = cv2.resize(cam_only_full, (W, H), interpolation=cv2.INTER_NEAREST)
     pseudo_full = cv2.resize(pseudo_full, (W, H), interpolation=cv2.INTER_NEAREST)
     
-    return cam_full, B_full, D_full, pseudo_full
+    return cam_full, B_full, D_full, cam_only_full, pseudo_full
 
 
-def visualize_results(img_rgb, cam, B, D, pseudo, gt=None, save_path=None):
+def visualize_results(img_rgb, cam, B, D, cam_only, pseudo, gt=None, save_path=None):
     """Visualize inference results"""
-    ncols = 6 if gt is None else 7
+    ncols = 8 if gt is None else 9
     fig, axes = plt.subplots(1, ncols, figsize=(4*ncols, 4))
     
     # Original image
@@ -582,23 +665,35 @@ def visualize_results(img_rgb, cam, B, D, pseudo, gt=None, save_path=None):
     axes[3].set_title('Displacement Magnitude')
     axes[3].axis('off')
     
-    # Pseudo label
-    axes[4].imshow(pseudo, cmap='gray')
-    axes[4].set_title('Pseudo Label')
+    # CAM-only label
+    axes[4].imshow(cam_only, cmap='gray')
+    axes[4].set_title('CAM Only Label')
     axes[4].axis('off')
-    
-    # Overlay
-    overlay = img_rgb.copy()
-    overlay[pseudo > 0] = overlay[pseudo > 0] * 0.5 + np.array([255, 0, 0]) * 0.5
-    axes[5].imshow(overlay.astype(np.uint8))
-    axes[5].set_title('Overlay')
+
+    # CAM+IRN pseudo label
+    axes[5].imshow(pseudo, cmap='gray')
+    axes[5].set_title('CAM + IRN Label')
     axes[5].axis('off')
+    
+    # CAM-only overlay
+    overlay_cam = img_rgb.copy()
+    overlay_cam[cam_only > 0] = overlay_cam[cam_only > 0] * 0.5 + np.array([0, 255, 255]) * 0.5
+    axes[6].imshow(overlay_cam.astype(np.uint8))
+    axes[6].set_title('Overlay CAM Only')
+    axes[6].axis('off')
+
+    # CAM+IRN overlay
+    overlay_irn = img_rgb.copy()
+    overlay_irn[pseudo > 0] = overlay_irn[pseudo > 0] * 0.5 + np.array([255, 0, 0]) * 0.5
+    axes[7].imshow(overlay_irn.astype(np.uint8))
+    axes[7].set_title('Overlay CAM + IRN')
+    axes[7].axis('off')
     
     # Ground truth (if available)
     if gt is not None:
-        axes[6].imshow(gt, cmap='gray')
-        axes[6].set_title('Ground Truth')
-        axes[6].axis('off')
+        axes[8].imshow(gt, cmap='gray')
+        axes[8].set_title('Ground Truth')
+        axes[8].axis('off')
     
     plt.tight_layout()
     
@@ -639,6 +734,116 @@ def compute_metrics(pred, gt):
     }
 
 
+def save_and_visualize_overall_metrics(metrics_records, output_dir, prefix='cam_irn'):
+    """Save per-image metrics and create overall evaluation visualization."""
+    if not metrics_records:
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    metric_names = ['IoU', 'Precision', 'Recall', 'F1']
+    values = np.array([[record[m] for m in metric_names] for record in metrics_records], dtype=np.float32)
+
+    means = values.mean(axis=0)
+    stds = values.std(axis=0)
+    mins = values.min(axis=0)
+    maxs = values.max(axis=0)
+
+    # Save per-image metrics CSV
+    per_image_csv = os.path.join(output_dir, f'evaluation_metrics_per_image_{prefix}.csv')
+    with open(per_image_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['filename'] + metric_names)
+        for record in metrics_records:
+            writer.writerow([record['filename']] + [f"{record[m]:.6f}" for m in metric_names])
+
+    # Save summary CSV
+    summary_csv = os.path.join(output_dir, f'evaluation_metrics_summary_{prefix}.csv')
+    with open(summary_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['metric', 'mean', 'std', 'min', 'max'])
+        for i, name in enumerate(metric_names):
+            writer.writerow([
+                name,
+                f"{means[i]:.6f}",
+                f"{stds[i]:.6f}",
+                f"{mins[i]:.6f}",
+                f"{maxs[i]:.6f}"
+            ])
+
+    # Create visualization figure
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left: mean ± std
+    x = np.arange(len(metric_names))
+    colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']
+    axes[0].bar(x, means, yerr=stds, capsize=5, color=colors, alpha=0.85)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(metric_names)
+    axes[0].set_ylim(0.0, 1.0)
+    axes[0].set_ylabel('Score')
+    axes[0].set_title('Overall Metrics (Mean ± Std)')
+    axes[0].grid(True, axis='y', alpha=0.3)
+
+    for i, v in enumerate(means):
+        axes[0].text(i, min(v + 0.03, 0.98), f"{v:.3f}", ha='center', va='bottom', fontsize=9)
+
+    # Right: per-image distribution
+    axes[1].boxplot([values[:, i] for i in range(len(metric_names))], tick_labels=metric_names, showmeans=True)
+    axes[1].set_ylim(0.0, 1.0)
+    axes[1].set_ylabel('Score')
+    axes[1].set_title('Per-Image Metric Distribution')
+    axes[1].grid(True, axis='y', alpha=0.3)
+
+    fig.suptitle(f'{prefix.upper()} Evaluation on {len(metrics_records)} Images', fontsize=13)
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_dir, f'evaluation_metrics_overall_{prefix}.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    return {
+        'plot_path': plot_path,
+        'per_image_csv': per_image_csv,
+        'summary_csv': summary_csv,
+        'means': {name: float(means[i]) for i, name in enumerate(metric_names)},
+        'stds': {name: float(stds[i]) for i, name in enumerate(metric_names)}
+    }
+
+
+def save_comparison_metrics_plot(cam_summary, irn_summary, output_dir):
+    """Create side-by-side comparison plot for CAM-only vs CAM+IRN metrics."""
+    metric_names = ['IoU', 'Precision', 'Recall', 'F1']
+    cam_means = [cam_summary['means'][m] for m in metric_names]
+    irn_means = [irn_summary['means'][m] for m in metric_names]
+
+    x = np.arange(len(metric_names))
+    width = 0.36
+
+    fig, ax = plt.subplots(1, 1, figsize=(9, 5))
+    ax.bar(x - width / 2, cam_means, width, label='CAM Only', color='#17becf')
+    ax.bar(x + width / 2, irn_means, width, label='CAM + IRN', color='#d62728')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(metric_names)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel('Score')
+    ax.set_title('CAM-only vs CAM+IRN Mean Metrics')
+    ax.grid(True, axis='y', alpha=0.3)
+    ax.legend()
+
+    for i, v in enumerate(cam_means):
+        ax.text(i - width / 2, min(v + 0.02, 0.98), f"{v:.3f}", ha='center', va='bottom', fontsize=8)
+    for i, v in enumerate(irn_means):
+        ax.text(i + width / 2, min(v + 0.02, 0.98), f"{v:.3f}", ha='center', va='bottom', fontsize=8)
+
+    plt.tight_layout()
+    cmp_path = os.path.join(output_dir, 'evaluation_metrics_comparison_cam_vs_cam_irn.png')
+    plt.savefig(cmp_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return cmp_path
+
+
 def main():
     print("=" * 60)
     print("STAGE 4: Pseudo Label Synthesis")
@@ -649,9 +854,11 @@ def main():
     
     # Create output directories
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
-    pseudo_dir = os.path.join(config.OUTPUT_DIR, 'pseudo_labels')
+    pseudo_dir_cam_only = os.path.join(config.OUTPUT_DIR, 'pseudo_labels_cam_only')
+    pseudo_dir_cam_irn = os.path.join(config.OUTPUT_DIR, 'pseudo_labels_cam_irn')
     vis_dir = os.path.join(config.OUTPUT_DIR, 'visualizations')
-    os.makedirs(pseudo_dir, exist_ok=True)
+    os.makedirs(pseudo_dir_cam_only, exist_ok=True)
+    os.makedirs(pseudo_dir_cam_irn, exist_ok=True)
     os.makedirs(vis_dir, exist_ok=True)
     
     # Load models
@@ -708,7 +915,8 @@ def main():
     # Process images
     print(f"\n🎨 Processing images...")
     
-    all_metrics = []
+    all_metrics_cam_only = []
+    all_metrics_cam_irn = []
     
     for idx in range(len(dataset)):
         img_rgb, gt, fname = dataset[idx]
@@ -719,49 +927,86 @@ def main():
         print(f"   Image size: {img_rgb.shape[0]}x{img_rgb.shape[1]}")
         
         # Process
-        cam, B, D, pseudo = process_full_image(
+        cam, B, D, cam_only, pseudo = process_full_image(
             img_rgb, cam_net, irnet, transform, device,
             patch_size=config.INFERENCE_PATCH_SIZE,
             stride=config.INFERENCE_STRIDE
         )
         
-        # Save pseudo label
-        pseudo_path = os.path.join(pseudo_dir, fname.replace('.jpg', '_pseudo.png'))
-        cv2.imwrite(pseudo_path, pseudo)
-        print(f"   ✅ Pseudo label saved: {pseudo_path}")
+        # Save CAM-only and CAM+IRN pseudo labels using original filename (e.g., 017.png)
+        pseudo_name = os.path.splitext(fname)[0] + '.png'
+        cam_only_path = os.path.join(pseudo_dir_cam_only, pseudo_name)
+        pseudo_irn_path = os.path.join(pseudo_dir_cam_irn, pseudo_name)
+        cv2.imwrite(cam_only_path, cam_only)
+        cv2.imwrite(pseudo_irn_path, pseudo)
+        print(f"   ✅ Pseudo label (CAM only) saved: {cam_only_path}")
+        print(f"   ✅ Pseudo label (CAM+IRN) saved: {pseudo_irn_path}")
         
         # Visualize
         if config.SAVE_VISUALIZATIONS:
             vis_path = os.path.join(vis_dir, fname.replace('.jpg', '_vis.png'))
-            visualize_results(img_rgb, cam, B, D, pseudo, gt, vis_path)
+            visualize_results(img_rgb, cam, B, D, cam_only, pseudo, gt, vis_path)
         
         # Compute metrics if GT available
         if gt is not None and config.COMPUTE_METRICS:
-            metrics = compute_metrics(pseudo, gt)
-            all_metrics.append(metrics)
+            metrics_cam = compute_metrics(cam_only, gt)
+            metrics_irn = compute_metrics(pseudo, gt)
+            all_metrics_cam_only.append({
+                'filename': fname,
+                **metrics_cam
+            })
+            all_metrics_cam_irn.append({
+                'filename': fname,
+                **metrics_irn
+            })
             
             print(f"\n   📊 Metrics:")
-            print(f"      IoU: {metrics['IoU']:.4f}")
-            print(f"      Precision: {metrics['Precision']:.4f}")
-            print(f"      Recall: {metrics['Recall']:.4f}")
-            print(f"      F1: {metrics['F1']:.4f}")
+            print(f"      CAM-only  IoU/Prec/Rec/F1: {metrics_cam['IoU']:.4f} / {metrics_cam['Precision']:.4f} / {metrics_cam['Recall']:.4f} / {metrics_cam['F1']:.4f}")
+            print(f"      CAM+IRN IoU/Prec/Rec/F1: {metrics_irn['IoU']:.4f} / {metrics_irn['Precision']:.4f} / {metrics_irn['Recall']:.4f} / {metrics_irn['F1']:.4f}")
     
     # Average metrics
-    if all_metrics:
+    if all_metrics_cam_irn:
         print(f"\n{'='*60}")
         print("AVERAGE METRICS")
         print(f"{'='*60}")
-        
-        avg_metrics = {
-            key: np.mean([m[key] for m in all_metrics])
-            for key in all_metrics[0].keys()
+
+        avg_metrics_cam = {
+            key: np.mean([m[key] for m in all_metrics_cam_only])
+            for key in ['IoU', 'Precision', 'Recall', 'F1']
         }
         
-        for key, val in avg_metrics.items():
-            print(f"   {key}: {val:.4f}")
+        avg_metrics_irn = {
+            key: np.mean([m[key] for m in all_metrics_cam_irn])
+            for key in ['IoU', 'Precision', 'Recall', 'F1']
+        }
+
+        print("   CAM-only:")
+        for key, val in avg_metrics_cam.items():
+            print(f"      {key}: {val:.4f}")
+
+        print("   CAM+IRN:")
+        for key, val in avg_metrics_irn.items():
+            print(f"      {key}: {val:.4f}")
+
+        cam_summary = save_and_visualize_overall_metrics(
+            all_metrics_cam_only, config.OUTPUT_DIR, prefix='cam_only'
+        )
+
+        irn_summary = save_and_visualize_overall_metrics(
+            all_metrics_cam_irn, config.OUTPUT_DIR, prefix='cam_irn'
+        )
+
+        if cam_summary is not None and irn_summary is not None:
+            cmp_path = save_comparison_metrics_plot(cam_summary, irn_summary, config.OUTPUT_DIR)
+            print(f"📊 CAM-only overall plot: {cam_summary['plot_path']}")
+            print(f"📊 CAM+IRN overall plot: {irn_summary['plot_path']}")
+            print(f"📊 Comparison plot: {cmp_path}")
+            print(f"🧾 CAM-only per-image CSV: {cam_summary['per_image_csv']}")
+            print(f"🧾 CAM+IRN per-image CSV: {irn_summary['per_image_csv']}")
     
     print(f"\n✅ All done!")
-    print(f"   Pseudo labels saved in: {pseudo_dir}")
+    print(f"   CAM-only pseudo labels saved in: {pseudo_dir_cam_only}")
+    print(f"   CAM+IRN pseudo labels saved in: {pseudo_dir_cam_irn}")
     print(f"   Visualizations saved in: {vis_dir}")
 
 
