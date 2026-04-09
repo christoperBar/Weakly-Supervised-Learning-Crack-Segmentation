@@ -188,6 +188,85 @@ cd crack_segmentation
 python api.py
 ```
 
+### 🔌 API Usage
+
+Setelah `api.py` berjalan (default di `http://localhost:8000`), tersedia beberapa endpoint:
+
+#### 1. Health Check
+
+- **Method**: `GET`
+- **URL**: `/health`
+- **Response**: `{"status": "ok"}` jika service siap.
+
+Contoh:
+
+```bash
+curl http://localhost:8000/health
+```
+
+#### 2. Stage 5 UNet Inference
+
+Menghasilkan prediksi mask crack dari model ResNet50-UNet (Stage 5).
+
+- **Method**: `POST`
+- **URL**: `/stage5/unet`
+- **Content-Type**: `multipart/form-data`
+- **Form field**:
+    - `image` (wajib): file gambar input (JPG/PNG, otomatis dikonversi ke RGB)
+    - `variant` (opsional, default `cam_irn`):
+        - `cam_irn` → pakai model di `outputs/stage5_unet_irn/best_model.pth`
+        - `cam_only` → pakai model di `outputs/stage5_unet/best_model.pth`
+- **Response**: file PNG berisi binary mask (0 = background, 255 = crack).
+
+Contoh dengan `curl`:
+
+```bash
+curl -X POST http://localhost:8000/stage5/unet \
+    -F "image=@path/ke/gambar.jpg" \
+    -F "variant=cam_irn" \
+    -o mask_unet.png
+```
+
+#### 3. Stage 4 Pseudo Label Inference (CAM / CAM+IRN)
+
+Menghasilkan pseudo label dari kombinasi CAM + IRNet (Stage 4).
+
+- **Method**: `POST`
+- **URL**: `/inference/pseudo`
+- **Content-Type**: `multipart/form-data`
+- **Form field**:
+    - `image` (wajib): file gambar input
+    - `mode` (opsional, default `cam_irn`):
+        - `cam_irn` → pseudo label dari CAM + IRNet
+        - `cam_only` → pseudo label dari CAM saja
+- **Response**: file PNG berisi binary mask pseudo label.
+
+Contoh:
+
+```bash
+curl -X POST http://localhost:8000/inference/pseudo \
+    -F "image=@path/ke/gambar.jpg" \
+    -F "mode=cam_irn" \
+    -o pseudo_label.png
+```
+
+#### 4. Integrasi Frontend (contoh singkat)
+
+Jika menggunakan frontend (misal React), kirim `FormData` seperti ini:
+
+```js
+const formData = new FormData();
+formData.append("image", file);
+formData.append("variant", "cam_irn"); // atau mode untuk /inference/pseudo
+
+const res = await fetch("http://localhost:8000/stage5/unet", {
+    method: "POST",
+    body: formData,
+});
+const blob = await res.blob();
+const url = URL.createObjectURL(blob); // bisa ditampilkan sebagai <img src={url} />
+```
+
 ## 🎨 Visualization
 
 Setiap stage menghasilkan visualizations:
