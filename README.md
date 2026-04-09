@@ -102,6 +102,7 @@ Jalankan dari root repo (`crack_segmentation_docker/`):
 ```bash
 docker run --gpus all -it \
     --shm-size=8g \
+    -p 8000:8000 \
     -v "$(pwd -W)/crack_segmentation:/workspace/crack_segmentation" \
     -v "$(pwd -W)/data:/workspace/data" \
     crack-irn:py310
@@ -178,6 +179,13 @@ python main.py --stage 5
 
 # Stage 5 Visualization: curve training + contoh segmentasi
 python main.py --stage 5v
+```
+#### Option C: Run API
+
+```bash
+cd crack_segmentation
+
+python api.py
 ```
 
 ## 🎨 Visualization

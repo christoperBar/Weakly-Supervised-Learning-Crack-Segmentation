@@ -551,7 +551,7 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
     print(f"   Processing {len(patches)} patches...")
     
     for y, x in tqdm(patches, desc="   Patches"):
-        # Extract patch
+        # Extract patch (may be smaller than patch_size near borders)
         patch = img_rgb[y:y+patch_size, x:x+patch_size]
         
         # Extract CAM
@@ -579,10 +579,14 @@ def process_full_image(img_rgb, cam_net, irnet, transform, device,
         D_resized[:, :, 1] = cv2.resize(D[:, :, 1], (patch_size, patch_size))
         
         # Accumulate with smooth blending weights
-        cam_accum[y:y+patch_size, x:x+patch_size] += cam_resized * patch_weight
-        B_accum[y:y+patch_size, x:x+patch_size] += B_resized * patch_weight
-        D_accum[y:y+patch_size, x:x+patch_size] += D_resized * patch_weight[:, :, None]
-        count[y:y+patch_size, x:x+patch_size] += patch_weight
+        # Handle border patches where y+patch_size or x+patch_size exceeds image size
+        h = min(patch_size, H - y)
+        w = min(patch_size, W - x)
+
+        cam_accum[y:y+h, x:x+w] += cam_resized[:h, :w] * patch_weight[:h, :w]
+        B_accum[y:y+h, x:x+w] += B_resized[:h, :w] * patch_weight[:h, :w]
+        D_accum[y:y+h, x:x+w] += D_resized[:h, :w, :] * patch_weight[:h, :w, None]
+        count[y:y+h, x:x+w] += patch_weight[:h, :w]
     
     # Average
     count[count == 0] = 1
