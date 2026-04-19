@@ -65,7 +65,7 @@ FOCAL_GAMMA = 2.0
 
 # Stage 2+3: IRNet Training
 IRN_EPOCHS = 50                      # Increased from 20
-IRN_BATCH_SIZE = 4                  # Lebih kecil karena lebih memory-intensive
+IRN_BATCH_SIZE = 8                  # Lebih kecil karena lebih memory-intensive
 IRN_LR = 6e-5 #1e-3                        # Keep at 1e-3 for fast learning
 IRN_WEIGHT_DECAY = 6e-6 #1e-5
 
