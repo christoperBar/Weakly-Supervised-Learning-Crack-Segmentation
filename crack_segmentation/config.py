@@ -56,8 +56,8 @@ RADIUS = 5                          # Search radius untuk neighbor pairs
 # Stage 1: Classification Network (CAM)
 CAM_EPOCHS = 50                      # Increased from 2 to 30 for better CAM learning
 CAM_BATCH_SIZE = 8
-CAM_LR = 1e-4                        # Reverted to original - 5e-4 was too high
-CAM_WEIGHT_DECAY = 1e-5
+CAM_LR = 0.1                        # Safer SGD LR for stable fine-tuning
+CAM_WEIGHT_DECAY = 0.0               # Disable weight decay
 
 # Focal Loss parameters
 FOCAL_ALPHA = 0.25

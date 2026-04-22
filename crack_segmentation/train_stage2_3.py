@@ -655,8 +655,9 @@ def main():
         {'params': dp_params, 'lr': config.IRN_LR * 0.5, 'name': 'displacement'}  # Lower LR for displacement
     ]
     
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.SGD(
         param_groups,
+        momentum=0.9,
         weight_decay=config.IRN_WEIGHT_DECAY
     )
     

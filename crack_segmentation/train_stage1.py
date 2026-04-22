@@ -49,6 +49,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
     correct = 0
     total = 0
     
+    skipped_batches = 0
     pbar = tqdm(loader, desc=f"Epoch {epoch+1}")
     for imgs, labels in pbar:
         imgs = imgs.to(device)
@@ -58,9 +59,18 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
         optimizer.zero_grad()
         outputs = model(imgs)
         loss = criterion(outputs, labels)
+
+        if not torch.isfinite(loss):
+            skipped_batches += 1
+            pbar.set_postfix({
+                'loss': 'nan-skip',
+                'acc': f'{100.*correct/max(total, 1):.2f}%'
+            })
+            continue
         
         # Backward
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         # Metrics
@@ -75,7 +85,11 @@ def train_one_epoch(model, loader, criterion, optimizer, device, epoch):
             'acc': f'{100.*correct/total:.2f}%'
         })
     
-    avg_loss = total_loss / len(loader)
+    effective_batches = len(loader) - skipped_batches
+    if skipped_batches > 0:
+        print(f"⚠ Skipped {skipped_batches} batch(es) due to non-finite loss")
+
+    avg_loss = total_loss / max(effective_batches, 1)
     accuracy = 100. * correct / total
     
     return avg_loss, accuracy
@@ -249,10 +263,11 @@ def main():
     print(f"   Trainable parameters: {trainable_params:,}")
     
     # Loss & Optimizer
-    criterion = FocalLoss(alpha=config.FOCAL_ALPHA, gamma=config.FOCAL_GAMMA)
-    optimizer = torch.optim.Adam(
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(
         model.parameters(),
         lr=config.CAM_LR,
+        momentum=0.9,
         weight_decay=config.CAM_WEIGHT_DECAY
     )
     

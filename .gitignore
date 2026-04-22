@@ -66,3 +66,5 @@ desktop.ini
 *.zip
 *.tar.gz
 .env
+
+recent/
