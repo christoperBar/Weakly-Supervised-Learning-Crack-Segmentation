@@ -65,9 +65,9 @@ FOCAL_GAMMA = 2.0
 
 # Stage 2+3: IRNet Training
 IRN_EPOCHS = 50                      # Increased from 20
-IRN_BATCH_SIZE = 8                  # Lebih kecil karena lebih memory-intensive
-IRN_LR = 6e-5 #1e-3                        # Keep at 1e-3 for fast learning
-IRN_WEIGHT_DECAY = 6e-6 #1e-5
+IRN_BATCH_SIZE = 8                  
+IRN_LR = 6e-5                     
+IRN_WEIGHT_DECAY = 6e-6 
 
 # Early stopping
 EARLY_STOPPING_ENABLED = True
@@ -100,12 +100,20 @@ REFINE_RADIUS = 1.0                 # Radius untuk neighbor averaging
 
 # DenseCRF post-processing
 USE_DENSECRF = True                 # Enable DenseCRF refinement
-DCRF_ITER = 20                      # Gentle refinement
-DCRF_POS_W = 10                     # Light spatial smoothing
+DCRF_ITER = 10                      # Gentle refinement
+DCRF_POS_W = 3                     # Light spatial smoothing
 DCRF_POS_XY_STD = 3                # Small spatial kernel
-DCRF_BI_W = 150                      # Light bilateral weight
-DCRF_BI_XY_STD = 10                 # Moderate bilateral spatial extent
-DCRF_BI_RGB_STD = 3                # Good color tolerance
+DCRF_BI_W = 10                      # Light bilateral weight
+DCRF_BI_XY_STD = 150                 # Moderate bilateral spatial extent
+DCRF_BI_RGB_STD = 30                # Good color tolerance
+
+# DCRF_ITER = 20                      # Gentle refinement
+# DCRF_POS_W = 10                     # Light spatial smoothing
+# DCRF_POS_XY_STD = 3                # Small spatial kernel
+# DCRF_BI_W = 150                      # Light bilateral weight
+# DCRF_BI_XY_STD = 10                 # Moderate bilateral spatial extent
+# DCRF_BI_RGB_STD = 3                 # Good color tolerance
+
 
 # Hybrid CAM + IRN parameters
 USE_BOUNDARY_REFINEMENT = True      # Use IRN boundary map to refine CAM
